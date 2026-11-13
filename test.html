@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#0d1117">
+<title>手机CAD · 测试用例</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #141c26; --border: #26303d;
+    --text: #e6edf3; --muted: #8b98a8; --accent: #37c8ff;
+    --ok: #3ddc97; --bad: #ff6b7a; --warn: #ffb020;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    padding: 0 0 calc(20px + env(safe-area-inset-bottom));
+    -webkit-text-size-adjust: 100%;
+  }
+  header {
+    position: sticky; top: 0; z-index: 5;
+    display: flex; align-items: center; gap: 10px;
+    padding: calc(10px + env(safe-area-inset-top)) 14px 10px;
+    background: rgba(13,17,23,.96);
+    border-bottom: 1px solid var(--border);
+    backdrop-filter: blur(8px);
+  }
+  header h1 { font-size: 16px; margin: 0; flex: 1; }
+  .btn {
+    height: 36px; padding: 0 14px; border-radius: 9px;
+    border: 1px solid var(--border); background: #1a2330; color: var(--text);
+    font-size: 13px; font-weight: 600; text-decoration: none;
+    display: inline-flex; align-items: center;
+  }
+  .btn.primary { background: var(--accent); color: #05202b; border-color: transparent; }
+  main { padding: 14px; max-width: 860px; margin: 0 auto; }
+  .summary {
+    display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px;
+  }
+  .stat {
+    flex: 1; min-width: 100px; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px;
+  }
+  .stat .n { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .stat .l { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .stat.ok .n { color: var(--ok); }
+  .stat.bad .n { color: var(--bad); }
+  .stat.info .n { color: var(--accent); }
+  section { margin-bottom: 18px; }
+  h2 {
+    font-size: 13px; color: var(--muted); font-weight: 600;
+    margin: 0 0 8px; letter-spacing: .5px;
+  }
+  .case {
+    display: flex; gap: 10px; align-items: flex-start;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 10px 12px; margin-bottom: 6px;
+  }
+  .mark { flex: none; width: 18px; text-align: center; font-weight: 700; }
+  .case.pass .mark { color: var(--ok); }
+  .case.fail .mark { color: var(--bad); }
+  .case .name { font-size: 13.5px; line-height: 1.5; }
+  .case .info { font-size: 11.5px; color: var(--muted); margin-top: 2px; word-break: break-word; }
+  .case.fail .info { color: #ffb3ba; }
+  .checklist label {
+    display: flex; gap: 10px; align-items: flex-start;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 11px 12px; margin-bottom: 6px;
+    font-size: 13.5px; line-height: 1.5;
+  }
+  .checklist input { width: 20px; height: 20px; margin: 0; flex: none; accent-color: #37c8ff; }
+  .checklist .sub { display: block; color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+  .note {
+    font-size: 11.5px; color: var(--muted); line-height: 1.7;
+    background: rgba(55,200,255,.06); border: 1px solid rgba(55,200,255,.22);
+    border-radius: 10px; padding: 10px 12px;
+  }
+  .env { font-size: 11px; color: #5f6f80; margin-top: 10px; word-break: break-all; }
+  code { color: #9ad8f0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>测试用例与结果</h1>
+  <a class="btn" href="index.html">← 返回应用</a>
+  <button class="btn primary" id="btnRun">重新运行</button>
+</header>
+
+<main>
+  <div class="summary" id="summary"></div>
+
+  <section>
+    <h2>自动化逻辑测试（几何 / 模型 / 编辑 / 视图 / 脚本 / 性能）</h2>
+    <div id="results"></div>
+  </section>
+
+  <section class="checklist">
+    <h2>移动端触摸功能测试（手动勾选）</h2>
+    <label><input type="checkbox"><span>1. 绘制直线：点按起点 → 拖动查看虚线预览 → 点按终点，图形生成<span class="sub">预期：两次点按完成直线，虚线预览跟随手指，捕捉点显示菱形标记</span></span></label>
+    <label><input type="checkbox"><span>2. 绘制圆 / 圆弧 / 点<span class="sub">预期：圆为“圆心 + 半径点”，圆弧为“圆心 + 起点 + 终点（逆时针）”，点按立即生成</span></span></label>
+    <label><input type="checkbox"><span>3. 坐标输入：直线输入起点 (10,10)、终点 (10,110)，圆输入圆心 (30,40)/半径 25，点输入 (-12.5,8)，分别点“确定”<span class="sub">预期：按输入值精确生成；空值/非数字标红并提示；直线起终点重合时拒绝生成</span></span></label>
+    <label><input type="checkbox"><span>4. 角度线与平行线<span class="sub">预期：角度线按参数角度生成长度线；平行线先点参考线，再输入偏移距离后“确定”（也可点通过点）</span></span></label>
+    <label><input type="checkbox"><span>5. 视图手势：双指捏合缩放、双指拖动平移<span class="sub">预期：缩放以双指中点为锚点，平移跟手，无跳变</span></span></label>
+    <label><input type="checkbox"><span>6. 双击空白自适应（选择工具）<span class="sub">预期：双击画布空白区域，所有图形完整显示并居中</span></span></label>
+    <label><input type="checkbox"><span>7. 选择与框选<span class="sub">预期：点按单个图形高亮，拖动可框选多个，底部出现已选数量</span></span></label>
+    <label><input type="checkbox"><span>8. 删除选中与“删除”工具<span class="sub">预期：选中条删除按钮生效；“删除”工具点按图形立即删除</span></span></label>
+    <label><input type="checkbox"><span>9. 裁剪直线 / 圆<span class="sub">预期：点按被交点分隔的线段部分被移除；圆可裁剪为圆弧</span></span></label>
+    <label><input type="checkbox"><span>10. 拉伸与平移<span class="sub">预期：拉伸拖动线端点改变长度；平移拖动选中图形整体移动</span></span></label>
+    <label><input type="checkbox"><span>11. 旋转<span class="sub">预期：先点基点，再拖动旋转选中图形；参数输入角度可精确旋转</span></span></label>
+    <label><input type="checkbox"><span>12. 链拾取<span class="sub">预期：点按折线任意一段，自动选中所有端点相连的图元，并显示数量与总长</span></span></label>
+    <label><input type="checkbox"><span>13. 等距线<span class="sub">预期：点图形 → 点偏移侧，按设定距离生成等距线（直线可左/右，圆可内/外）</span></span></label>
+    <label><input type="checkbox"><span>14. 测量长度 / 角度 / 距离<span class="sub">预期：悬浮面板显示数值，画布出现标注；角度为两直线锐角并显示补角</span></span></label>
+    <label><input type="checkbox"><span>15. 属性查询与编辑<span class="sub">预期：属性面板中的坐标、半径、角度可直接修改，画布实时同步；非法值标红提示且不改变图形；修改后可撤销/重做</span></span></label>
+    <label><input type="checkbox"><span>16. 撤销 / 重做<span class="sub">预期：所有绘图与编辑操作可撤销、可重做，按钮禁用状态正确</span></span></label>
+    <label><input type="checkbox"><span>17. 脚本控制台（&lt;/&gt;）<span class="sub">预期：运行示例脚本生成 6 个图元；错误命令给出错误行号</span></span></label>
+    <label><input type="checkbox"><span>18. 旋转屏幕 / 窄屏适配<span class="sub">预期：横竖屏切换后画布自适应，工具栏不遮挡绘图区</span></span></label>
+    <label><input type="checkbox"><span>19. 操作响应<span class="sub">预期：点按、拖动、缩放均即时响应，无明显卡顿（单帧 &lt; 100ms）</span></span></label>
+    <label><input type="checkbox"><span>20. 圆弧过渡<span class="sub">预期：编辑页选择“圆弧过渡”，依次点两条相交/相邻线段，设置半径后确定；生成相切圆弧，两条线保留且可继续编辑；半径过大或平行时给出提示</span></span></label>
+    <label><input type="checkbox"><span>21. 输入校验与键盘<span class="sub">预期：参数输入框弹出数字键盘；空值/非数字/负半径标红并提示，不会生成错误图形；点“确定”后焦点释放、画布无卡顿</span></span></label>
+    <label><input type="checkbox"><span>22. 平移精确偏移与连续选择<span class="sub">预期：打开“连续选择”后点选多个图形，输入 X/Y 偏移（如 10/-5）并确定，所有选中对象同时平移；零偏移给出提示</span></span></label>
+    <label><input type="checkbox"><span>23. 直线正交<span class="sub">预期：打开“正交”后拖动只生成水平/垂直直线，预览实时吸附；关闭后恢复任意角度</span></span></label>
+    <label><input type="checkbox"><span>24. 拉伸约束<span class="sub">预期：直线端点只沿原方向伸缩，方向不变；圆弧拖动端点时圆心与半径固定，仅弧长变化</span></span></label>
+    <label><input type="checkbox"><span>25. 等距线方向<span class="sub">预期：输入距离并切换左侧/右侧/双侧，预览与实际生成一致；单侧只生成 1 条完整等距线，无多余线条或断开；重复确定不会叠加重合线条</span></span></label>
+    <label><input type="checkbox"><span>26. 坐标点集合<span class="sub">预期：查询页“坐标点”连续点选端点/中点/交点/圆心，面板自动汇总 P1..Pn 坐标列表，重复点被忽略</span></span></label>
+    <label><input type="checkbox"><span>27. 矩阵与环形阵列<span class="sub">预期：编辑页选“阵列”，选中图形后切换阵型：矩形设置行数/列数/行距/列距，环形设置数量/总角度；环形打开“自定义圆心”可输入圆心坐标或点按画布空白处拾取，预览随之变化；确定后按规则生成副本、源对象保留；数量非法或超过 400 个副本时提示</span></span></label>
+    <label><input type="checkbox"><span>28. 连续选择与关联选择<span class="sub">预期：选择工具打开“连续选择”后可逐个点按累加/取消选中，框选为追加；再打开“关联选择”时点按一段，自动带出端点相连的整条图形</span></span></label>
+  </section>
+
+  <div class="note">
+    说明：自动化用例覆盖几何计算、裁剪/偏移/等距线去重/阵列/连续选择/圆弧过渡/正交/属性编辑/坐标点/链拾取算法、视图变换与脚本解析，可在任何浏览器直接运行；
+    触摸相关用例需在手机端（或浏览器设备模拟器）按清单逐项验证。截图或异常时请记录设备型号与浏览器版本。
+  </div>
+  <div class="env" id="env"></div>
+</main>
+
+<script src="js/geometry.js"></script>
+<script src="js/model.js"></script>
+<script src="js/view.js"></script>
+<script src="js/script.js"></script>
+<script src="js/tools.js"></script>
+<script src="js/tests.js"></script>
+<script>
+(function () {
+  function render() {
+    var results = window.CADTests.run();
+    var pass = 0, fail = 0, perf = '';
+    results.forEach(function (r) {
+      if (r.pass) pass++; else fail++;
+      if (r.suite === '性能冒烟' && r.pass && !perf) perf = r.info;
+    });
+    var summary = document.getElementById('summary');
+    summary.innerHTML =
+      '<div class="stat ok"><div class="n">' + pass + '</div><div class="l">通过</div></div>' +
+      '<div class="stat bad"><div class="n">' + fail + '</div><div class="l">失败</div></div>' +
+      '<div class="stat info"><div class="n">' + results.length + '</div><div class="l">自动化用例总数</div></div>' +
+      (perf ? '<div class="stat info"><div class="n" style="font-size:15px">' + perf + '</div><div class="l">拾取性能</div></div>' : '');
+
+    var box = document.getElementById('results');
+    box.innerHTML = '';
+    var groups = {};
+    results.forEach(function (r) {
+      if (!groups[r.suite]) groups[r.suite] = [];
+      groups[r.suite].push(r);
+    });
+    Object.keys(groups).forEach(function (name) {
+      var h = document.createElement('h2');
+      h.textContent = name;
+      box.appendChild(h);
+      groups[name].forEach(function (r) {
+        var div = document.createElement('div');
+        div.className = 'case ' + (r.pass ? 'pass' : 'fail');
+        div.innerHTML = '<div class="mark">' + (r.pass ? '✓' : '✕') + '</div>' +
+          '<div><div class="name">' + r.name + '</div>' +
+          (r.info ? '<div class="info">' + r.info + '</div>' : '') + '</div>';
+        box.appendChild(div);
+      });
+    });
+
+    document.getElementById('env').textContent = 'UA: ' + navigator.userAgent +
+      ' · Viewport: ' + window.innerWidth + '×' + window.innerHeight +
+      ' · DPR: ' + (window.devicePixelRatio || 1) + ' · ' + new Date().toLocaleString('zh-CN');
+  }
+  document.getElementById('btnRun').addEventListener('click', render);
+  render();
+})();
+</script>
+</body>
+</html>
