@@ -485,6 +485,38 @@
             Script.run('line 0 0 10 0\ncircle 0 0 10\nclear', d);
             assert(d.count() === 0, 'clear 应清空图元');
           }
+        },
+        {
+          name: '修改 / 平移 / 删除已有图形',
+          run: function () {
+            const d = new Doc();
+            Script.run('line 0 0 100 0\nline 0 10 100 10\ncircle 50 50 20', d);
+            const rep = Script.run('set 1 x2 200 y2 0\nmove 2 10 -5\ndel 3', d);
+            assert(rep.errors.length === 0, '不应有错误：' + JSON.stringify(rep.errors));
+            assert(rep.updated === 2 && rep.deleted === 1, '应记录 2 次修改与 1 次删除');
+            assert(d.count() === 2, '删除后应剩 2 个图元');
+            const l1 = d.entities[0], l2 = d.entities[1];
+            near(l1.p2.x, 200, 1e-9, 'set 修改终点 X');
+            near(l1.p2.y, 0, 1e-9);
+            near(l2.p1.x, 10, 1e-9, 'move 平移起点 X');
+            near(l2.p1.y, 5, 1e-9, 'move 平移起点 Y');
+            near(l2.p2.x, 110, 1e-9, 'move 整条线平移');
+          }
+        },
+        {
+          name: '修改参数原子校验（失败不写入）',
+          run: function () {
+            const d = new Doc();
+            Script.run('line 0 0 100 0', d);
+            const rep = Script.run('set 1 x1 999 x2 999', d);
+            assert(rep.errors.length === 1, '端点重合应报错');
+            const e = d.entities[0];
+            near(e.p1.x, 0, 1e-9, '校验失败时不应部分写入');
+            near(e.p2.x, 100, 1e-9);
+            const bad = Script.run('set 9 x1 0', d);
+            assert(bad.errors.length === 1, '越界序号应报错');
+            assert(bad.errors[0].message.indexOf('1~1') >= 0, '应提示序号范围');
+          }
         }
       ]
     },
@@ -557,13 +589,19 @@
             assert(app.model.entities[0].type === 'circle');
             near(app.model.entities[0].r, 50, 1e-9);
 
+            // 圆弧：两点 + 半径（第三次点按用当前半径确认）
+            app.params.r = 30;
+            app.params.amode = 'minor';
             const a = useTool('arc');
             a.onTap({ x: 200, y: 0 });
-            a.onTap({ x: 210, y: 0 });
-            a.onTap({ x: 200, y: 10 });
+            a.onTap({ x: 260, y: 0 });
+            a.onTap({ x: 0, y: 0 });
             const arcEnt = app.model.entities[1];
             assert(arcEnt.type === 'arc', '应创建圆弧');
-            near(Geo.arcSweep(arcEnt), Math.PI / 2, 1e-9, '逆时针 90°');
+            near(arcEnt.r, 30, 1e-9, '半径按输入值');
+            near(Geo.dist(Geo.arcStart(arcEnt), { x: 200, y: 0 }), 0, 1e-6, '起点正确');
+            near(Geo.dist(Geo.arcEnd(arcEnt), { x: 260, y: 0 }), 0, 1e-6, '终点正确');
+            near(Geo.arcSweep(arcEnt), Math.PI, 1e-6, '半径等于半弦长时为半圆');
           }
         },
         {
@@ -728,6 +766,339 @@
           }
         },
         {
+          name: '等距线：矩形闭合链双侧斜接',
+          run: function () {
+            const app = mockApp();
+            app.model.add(line(0, 0, 100, 0));
+            app.model.add(line(100, 0, 100, 60));
+            app.model.add(line(100, 60, 0, 60));
+            app.model.add(line(0, 60, 0, 0));
+            app.model.entities.forEach(function (e) { app.model.selected.add(e.id); });
+            app.params.dist = 10;
+            app.params.oside = 'both';
+            const t = useTool('offset');
+            t.applyParams();
+            // 4 条边 → 内外各 4 段，共 8 条等距线
+            assert(app.model.count() === 12, '矩形双侧应生成 8 条等距线，实际 ' + (app.model.count() - 4));
+            const offs = app.model.entities.slice(4);
+            function has(x1, y1, x2, y2) {
+              return offs.some(function (e) {
+                return e.type === 'line' &&
+                  Math.abs(e.p1.x - x1) < 1e-6 && Math.abs(e.p1.y - y1) < 1e-6 &&
+                  Math.abs(e.p2.x - x2) < 1e-6 && Math.abs(e.p2.y - y2) < 1e-6;
+              });
+            }
+            assert(has(-10, -10, 110, -10), '外圈下边应斜接到角点');
+            assert(has(110, -10, 110, 70), '外圈右边应斜接到角点');
+            assert(has(110, 70, -10, 70), '外圈上边应斜接到角点');
+            assert(has(-10, 70, -10, -10), '外圈左边应斜接到角点');
+            assert(has(10, 10, 90, 10), '内圈下边应斜接到角点');
+            assert(has(90, 10, 90, 50), '内圈右边应斜接到角点');
+            assert(has(90, 50, 10, 50), '内圈上边应斜接到角点');
+            assert(has(10, 50, 10, 10), '内圈左边应斜接到角点');
+            // 拐角不应出现超出角点的多余交叉线
+            const bad = offs.filter(function (e) {
+              return e.type === 'line' && (
+                Math.abs(e.p1.y + 10) < 1e-6 && Math.abs(e.p2.y + 10) < 1e-6 &&
+                (e.p1.x < -10 - 1e-6 || e.p2.x > 110 + 1e-6)
+              );
+            });
+            assert(bad.length === 0, '拐角处不应有超出交叉线段');
+          }
+        },
+        {
+          name: '等距线：直线 + 圆弧链首尾相连',
+          run: function () {
+            const app = mockApp();
+            app.model.add(arc(0, 0, 50, 0, Math.PI / 2, true));
+            app.model.add(line(0, 50, -100, 50));
+            app.model.entities.forEach(function (e) { app.model.selected.add(e.id); });
+            app.params.dist = 10;
+            app.params.oside = 'left';
+            const t = useTool('offset');
+            t.applyParams();
+            assert(app.model.count() === 4, '左侧应生成 2 段等距线');
+            const lArc = app.model.entities[2];
+            const lLine = app.model.entities[3];
+            assert(lArc.type === 'arc' && lLine.type === 'line', '结果应为圆弧 + 直线');
+            near(lArc.r, 40, 1e-9, '圆弧向左内侧偏移');
+            near(lLine.p1.y, 40, 1e-9, '直线向左偏移');
+            near(lLine.p2.y, 40, 1e-9);
+            assert(Geo.dist(Geo.arcEnd(lArc), lLine.p1) < 1e-7, '圆弧终点与直线起点应首尾相连');
+            assert(Math.min(lLine.p1.x, lLine.p2.x) >= -100 - 1e-9, '偏移线不应越过原端点产生多余段');
+
+            app.model.selected.clear();
+            app.model.entities.slice(0, 2).forEach(function (e) { app.model.selected.add(e.id); });
+            app.params.oside = 'right';
+            const t2 = useTool('offset');
+            t2.applyParams();
+            assert(app.model.count() === 6, '右侧应再生成 2 段');
+            const rArc = app.model.entities[4];
+            const rLine = app.model.entities[5];
+            near(rArc.r, 60, 1e-9, '圆弧向右外侧偏移');
+            near(rLine.p1.y, 60, 1e-9);
+            assert(Geo.dist(Geo.arcEnd(rArc), rLine.p1) < 1e-7, '右侧同样首尾相连');
+          }
+        },
+        {
+          name: '等距线：小圆弧偏移无效时其余段仍生成',
+          run: function () {
+            const app = mockApp();
+            app.model.add(line(0, 40, 100, 40));
+            app.model.add(arc(100, 35, 5, Math.PI / 2, 0, false));
+            app.model.add(line(105, 35, 105, -60));
+            app.model.entities.forEach(function (e) { app.model.selected.add(e.id); });
+            app.params.dist = 10;
+            app.params.oside = 'both';
+            useTool('offset').applyParams();
+            assert(app.model.count() === 8, '外侧 3 段 + 内侧 2 段，不能整侧丢失');
+            near(app.model.entities[3].p1.y, 50, 1e-9, '外侧第一段');
+            near(app.model.entities[5].p1.x, 115, 1e-9, '外侧末段');
+            const in1 = app.model.entities[6];
+            const in2 = app.model.entities[7];
+            near(in1.p1.y, 30, 1e-9, '内侧直线仍生成');
+            near(in2.p1.x, 95, 1e-9);
+            assert(Geo.dist(in1.p2, in2.p1) < 1e-9, '跳过的小圆弧处两段应斜接相连');
+          }
+        },
+        {
+          name: '平行线：单侧任意方向与双侧生成',
+          run: function () {
+            const app = mockApp();
+            app.model.add(line(0, 0, 100, 0));
+            const t = useTool('parallel');
+            t.onTap({ x: 50, y: 0 });
+            t.onTap({ x: 50, y: -45 });
+            assert(app.model.count() === 2, '点按下方应生成 1 条平行线');
+            near(app.model.entities[1].p1.y, -45, 1e-9, '可在基准线下方生成');
+
+            t.onTap({ x: 50, y: 0 });
+            t.onTap({ x: 50, y: 30 });
+            near(app.model.entities[2].p1.y, 30, 1e-9, '也可在基准线上方生成');
+
+            app.params.poff = 25;
+            app.params.pside = 'both';
+            const t2 = useTool('parallel');
+            t2.onTap({ x: 50, y: 0 });
+            t2.applyParams();
+            assert(app.model.count() === 5, '双侧应新增 2 条平行线');
+            const ys = app.model.entities.slice(3).map(function (e) { return Math.round(e.p1.y); })
+              .sort(function (a, b) { return a - b; });
+            near(ys[0], -25, 1e-9, '左法向反向');
+            near(ys[1], 25, 1e-9, '左法向正向');
+          }
+        },
+        {
+          name: '圆弧：两点 + 半径的劣弧/优弧与半径自适应',
+          run: function () {
+            const app = mockApp();
+            app.params.r = 50;
+            app.params.amode = 'minor';
+            const t = useTool('arc');
+            t.onTap({ x: 0, y: 0 });
+            t.onTap({ x: 60, y: 0 });
+            t.applyParams();
+            assert(app.model.entities[0].type === 'arc', '应生成圆弧');
+            near(app.model.entities[0].r, 50, 1e-9);
+            const minorSweep = 2 * Math.asin(30 / 50);
+            near(Geo.arcSweep(app.model.entities[0]), minorSweep, 1e-6, '劣弧扫掠角');
+
+            app.params.amode = 'major';
+            t.onTap({ x: 0, y: 0 });
+            t.onTap({ x: 60, y: 0 });
+            t.applyParams();
+            near(Geo.arcSweep(app.model.entities[1]), Math.PI * 2 - minorSweep, 1e-6, '优弧扫掠角');
+
+            // 半径小于弦长一半：自动按半圆生成
+            app.params.r = 10;
+            app.params.amode = 'minor';
+            t.onTap({ x: 0, y: 0 });
+            t.onTap({ x: 60, y: 0 });
+            t.applyParams();
+            near(app.model.entities[2].r, 30, 1e-9, '半径自动适配为半弦长');
+            near(Geo.arcSweep(app.model.entities[2]), Math.PI, 1e-6, '退化为半圆');
+          }
+        },
+        {
+          name: '点工具：靠近圆/圆弧自动捕捉圆心',
+          run: function () {
+            const app = mockApp();
+            app.model.add(circle(100, 0, 30));
+            app.model.add(arc(0, 100, 20, 0, Math.PI, true));
+            const t = useTool('point');
+            t.onTap({ x: 100, y: 29 });
+            assert(app.model.entities[2].type === 'point');
+            near(app.model.entities[2].p.x, 100, 1e-9, '圆上点按捕捉圆心 X');
+            near(app.model.entities[2].p.y, 0, 1e-9, '圆上点按捕捉圆心 Y');
+
+            t.onTap({ x: -19, y: 101 });
+            near(app.model.entities[3].p.x, 0, 1e-9, '圆弧上点按捕捉圆心 X');
+            near(app.model.entities[3].p.y, 100, 1e-9, '圆弧上点按捕捉圆心 Y');
+
+            t.onTap({ x: 300, y: 300 });
+            near(app.model.entities[4].p.x, 300, 1e-9, '远离圆时正常放点');
+            assert(app.model.entities[4].p.y === 300);
+          }
+        },
+        {
+          name: '直线工具：圆相切与直线垂直辅助',
+          run: function () {
+            const app = mockApp();
+            app.model.add(circle(0, 0, 50));
+            const t = useTool('line');
+            t.onTap({ x: 50, y: 0 });
+            assert(app.params.lref === 'circle', '起点落在圆上应提供相切选项');
+            app.params.tangent = true;
+            t.onTap({ x: 50, y: 60 });
+            const tan = app.model.entities[1];
+            assert(tan.type === 'line');
+            near(tan.p1.x, 50, 1e-9);
+            near(tan.p1.y, 0, 1e-9);
+            near(tan.p2.x, 50, 1e-9, '切线应沿径向的法向');
+            near(tan.p2.y, 60, 1e-9, '切线长度随拖动');
+
+            app.model.add(line(0, 300, 100, 300));
+            app.params.tangent = false;
+            app.params.perp = false;
+            t.onTap({ x: 50, y: 300 });
+            assert(app.params.lref === 'line', '起点落在直线上应提供垂直选项');
+            app.params.perp = true;
+            t.onTap({ x: 70, y: 360 });
+            const per = app.model.entities[3];
+            near(per.p2.x, 50, 1e-9, '垂线终点应垂直投影');
+            near(per.p2.y, 360, 1e-9);
+
+            // 起点落在圆弧上同样应提供切线选项
+            app.model.add(arc(200, 0, 40, 0, Math.PI, true));
+            app.params.perp = false;
+            t.onTap({ x: 240, y: 0 });
+            assert(app.params.lref === 'circle', '起点落在圆弧上应提供切线选项');
+            const defs = global.CADTools.byId('line').params();
+            const tanDef = defs.filter(function (q) { return q.key === 'tangent'; })[0];
+            const perDef = defs.filter(function (q) { return q.key === 'perp'; })[0];
+            assert(tanDef.label === '相切' && typeof tanDef.when === 'function', '圆弧起点显示相切选项');
+            assert(perDef.label === '垂直' && typeof perDef.when === 'function', '直线起点显示垂直选项');
+          }
+        },
+        {
+          name: '直线工具：经过图形时自动切换相切 / 垂直选项',
+          run: function () {
+            const app = mockApp();
+            app.model.add(circle(0, 0, 50));
+            app.model.add(line(-100, 80, 100, 80));
+            const t = useTool('line');
+            t.onHover({ x: 50, y: 0 });
+            assert(app.params.lref === 'circle', '光标经过圆应提供相切选项');
+            t.onHover({ x: 0, y: 80 });
+            assert(app.params.lref === 'line', '光标经过直线应提供垂直选项');
+            t.onTap({ x: 0, y: 80 });
+            assert(app.params.lref === 'line' && t.refId === app.model.entities[1].id, '起点参考保持为直线');
+            t.onHover({ x: 50, y: 0 });
+            assert(app.params.lref === 'circle', '绘制中再次经过圆应切回相切选项');
+            t.onHover({ x: 10, y: -40 });
+            assert(app.params.lref === 'line', '离开圆后回退到起点所在直线');
+          }
+        },
+        {
+          name: '直线终点：靠近圆弧吸附切点、靠近直线吸附垂足',
+          run: function () {
+            const app = mockApp();
+            app.model.add(circle(100, 0, 40));
+            app.model.add(line(50, -100, 50, 100));
+            app.params.asnap = true;
+            app.params.stol = '18';
+            const t = useTool('line');
+            t.onTap({ x: 0, y: 0 });
+            const res1 = t._endPoint({ x: 0, y: 0 }, { x: 100, y: 40 });
+            near(res1.p.x, 84, 0.6, '切点 X');
+            near(res1.p.y, 36.66, 0.6, '切点 Y');
+            assert(t.snapMode === '切点', '状态栏应显示切点捕捉');
+            assert(t.snapPt && Geo.dist(t.snapPt, res1.p) < 1e-9, '应有捕捉点用于视觉提示');
+
+            t.reset();
+            t.onTap({ x: 0, y: 0 });
+            const res2 = t._endPoint({ x: 0, y: 0 }, { x: 55, y: 30 });
+            near(res2.p.x, 50, 1e-9, '垂足 X');
+            near(res2.p.y, 0, 1e-9, '垂足 Y');
+            assert(t.snapMode === '垂足', '状态栏应显示垂足捕捉');
+
+            // 按住 Shift / 关闭自动捕捉时不吸附
+            t.reset();
+            t.onTap({ x: 0, y: 0 });
+            app.params.asnap = false;
+            const res3 = t._endPoint({ x: 0, y: 0 }, { x: 55, y: 30 });
+            near(res3.p.x, 55, 1e-9, '关闭后保持原始位置');
+            assert(t.snapMode === null, '关闭后无捕捉提示');
+            app.params.asnap = true;
+            t.snapHold = true;
+            const res4 = t._endPoint({ x: 0, y: 0 }, { x: 55, y: 30 });
+            near(res4.p.x, 55, 1e-9, '按住 Shift 临时关闭捕捉');
+            t.snapHold = false;
+          }
+        },
+        {
+          name: '镜像：指定轴生成对称副本',
+          run: function () {
+            const app = mockApp();
+            app.model.add(line(10, 10, 30, 10));
+            app.model.add(circle(20, 30, 5));
+            app.model.add(arc(20, 50, 10, 0, Math.PI / 2, true));
+            app.model.entities.forEach(function (e) { app.model.selected.add(e.id); });
+            app.params.x1 = 0; app.params.y1 = 0;
+            app.params.x2 = 0; app.params.y2 = 100;
+            const t = useTool('mirror');
+            t.applyParams();
+            assert(app.model.count() === 6, '应生成 3 个镜像副本并保留原图');
+            const ml = app.model.entities[3];
+            near(ml.p1.x, -10, 1e-9, '直线端点镜像 X');
+            near(ml.p1.y, 10, 1e-9);
+            near(ml.p2.x, -30, 1e-9);
+            const mc = app.model.entities[4];
+            assert(mc.type === 'circle');
+            near(mc.c.x, -20, 1e-9);
+            near(mc.c.y, 30, 1e-9);
+            near(mc.r, 5, 1e-9);
+            const ma = app.model.entities[5];
+            assert(ma.type === 'arc');
+            near(ma.c.x, -20, 1e-9);
+            near(Geo.arcSweep(ma), Math.PI / 2, 1e-6, '镜像后扫掠角不变');
+            assert(ma.ccw === false, '镜像后圆弧旋向翻转');
+            const mid = Geo.entityMidpoint(ma);
+            near(mid.x, -20 - 10 * Math.cos(Math.PI / 4), 1e-6, '圆弧镜像到轴线另一侧');
+
+            assert(app.model.selected.size === 0, '生成后清空选择');
+            t.applyParams();
+            assert(app.model.count() === 6, '未选中时不应再生成');
+
+            const app2 = mockApp();
+            app2.model.add(circle(0, 0, 5));
+            app2.model.selected.add(app2.model.entities[0].id);
+            app2.params.x1 = 0; app2.params.y1 = 0;
+            app2.params.x2 = 0; app2.params.y2 = 100;
+            useTool('mirror').applyParams();
+            assert(app2.model.count() === 1, '与已有图形重合的镜像应跳过');
+          }
+        },
+        {
+          name: '镜像：已选图形点按轴线立即完成',
+          run: function () {
+            const app = mockApp();
+            app.model.add(line(10, 10, 30, 10));
+            app.model.add(line(0, 0, 0, 100));
+            app.model.selected.add(app.model.entities[0].id);
+            const t = useTool('mirror');
+            t.onTap({ x: 0, y: 50 });
+            assert(app.model.count() === 3, '点按轴线后应立即生成 1 个副本');
+            const cp = app.model.entities[2];
+            assert(cp.type === 'line');
+            near(cp.p1.x, -10, 1e-9, '关于竖轴镜像 X');
+            near(cp.p2.x, -30, 1e-9);
+            near(cp.p1.y, 10, 1e-9, '镜像不改变 y');
+            assert(app.model.selected.size === 0, '完成后清空选择');
+            assert(app.toasts.join().indexOf('镜像副本') >= 0, '应提示已生成副本');
+          }
+        },
+        {
           name: '阵列：矩形行列生成副本',
           run: function () {
             const app = mockApp();
@@ -881,6 +1252,93 @@
             t2.onTap({ x: 0, y: 90 });
             assert(app.model.count() === 3, '过大半径不应生成');
             assert(app.toasts.join().indexOf('半径过大') >= 0, '应提示半径过大');
+          }
+        },
+        {
+          name: '圆弧过渡：直线到圆弧',
+          run: function () {
+            const app = mockApp();
+            app.model.add(line(-100, 0, 100, 0));
+            app.model.add(circle(0, 60, 50));
+            app.params.fr = 20;
+            const t = useTool('fillet');
+            t.onTap({ x: 80, y: 0 });
+            t.onTap({ x: 41, y: 31.4 });
+            assert(app.model.count() === 3, '应生成 1 条过渡圆弧');
+            const cut = app.model.entities[0];
+            near(cut.p2.x, 100, 1e-9, '保留点按侧线段');
+            const cx = Math.sqrt(70 * 70 - 40 * 40);
+            near(cut.p1.x, cx, 1e-6, '直线裁到切点');
+            near(cut.p1.y, 0, 1e-9);
+            const fillet = app.model.entities[2];
+            assert(fillet.type === 'arc');
+            near(fillet.r, 20, 1e-9);
+            near(fillet.c.y, 20, 1e-9, '圆心在直线上方 r 处');
+            near(Math.abs(fillet.c.x), cx, 1e-6, '圆心为支撑线与圆的交点');
+            const ends = [Geo.arcStart(fillet), Geo.arcEnd(fillet)];
+            assert(ends.some(function (q) { return Geo.dist(q, cut.p1) < 1e-6; }), '过渡弧应与直线切点相连');
+            assert(ends.some(function (q) { return Math.abs(Geo.dist(q, { x: 0, y: 60 }) - 50) < 1e-6; }), '过渡弧应与原圆相切');
+            near(app.model.entities[1].r, 50, 1e-9, '整圆保持原样');
+          }
+        },
+        {
+          name: '圆弧过渡：圆弧到圆弧',
+          run: function () {
+            const app = mockApp();
+            app.model.add(arc(-60, 0, 50, -Math.PI / 2, Math.PI / 2, true));
+            app.model.add(arc(60, 0, 50, Math.PI / 2, Math.PI * 1.5, true));
+            app.params.fr = 10;
+            const t = useTool('fillet');
+            t.onTap({ x: -10, y: 0 });
+            t.onTap({ x: 10, y: 0 });
+            assert(app.model.count() === 3, '两段圆弧之间应生成过渡圆弧');
+            const a1 = app.model.entities[0];
+            const a2 = app.model.entities[1];
+            const fillet = app.model.entities[2];
+            assert(fillet.type === 'arc');
+            near(fillet.r, 10, 1e-9);
+            near(fillet.c.x, 0, 1e-6, '圆心在两弧之间');
+            near(fillet.c.y, 0, 1e-6);
+            near(Geo.arcSweep(fillet), Math.PI, 1e-6, '过渡为半圆');
+            const e1 = Geo.arcStart(a1), e2 = Geo.arcEnd(a1);
+            const g1 = Geo.arcStart(a2), g2 = Geo.arcEnd(a2);
+            const f0 = Geo.polar(fillet.c, fillet.r, fillet.a0);
+            const f1 = Geo.polar(fillet.c, fillet.r, fillet.a1);
+            const touches = function (a, b) { return Geo.dist(a, b) < 1e-6; };
+            const all = [e1, e2, g1, g2];
+            assert(all.some(function (q) { return touches(q, f0); }), '过渡弧一端应与某段圆弧端点相连');
+            assert(all.some(function (q) { return touches(q, f1); }), '过渡弧另一端应与另一段圆弧端点相连');
+            near(a1.r, 50, 1e-9, '原弧半径不变');
+            near(a2.r, 50, 1e-9);
+          }
+        },
+        {
+          name: '圆弧过渡：关闭裁剪保留原图形',
+          run: function () {
+            const app = mockApp();
+            app.model.add(line(-100, 0, 100, 0));
+            app.model.add(line(0, -100, 0, 100));
+            app.params.fr = 20;
+            app.params.trim = false;
+            const t = useTool('fillet');
+            t.onTap({ x: 60, y: 0 });
+            t.onTap({ x: 0, y: 60 });
+            assert(app.model.count() === 3, '应只新增过渡圆弧');
+            near(app.model.entities[0].p1.x, -100, 1e-9, '横线未被裁剪');
+            near(app.model.entities[0].p2.x, 100, 1e-9);
+            near(app.model.entities[1].p1.y, -100, 1e-9, '竖线未被裁剪');
+            near(app.model.entities[1].p2.y, 100, 1e-9);
+            near(app.model.entities[2].r, 20, 1e-9, '圆弧半径正确');
+
+            // 默认开启裁剪时仍会收缩原图形
+            app.params.trim = true;
+            const t2 = useTool('fillet');
+            t2.onTap({ x: 60, y: 0 });
+            t2.onTap({ x: 0, y: 60 });
+            assert(app.model.count() === 4, '再次过渡只新增圆弧');
+            const xs = [app.model.entities[0].p1.x, app.model.entities[0].p2.x].sort(function (a, b) { return a - b; });
+            near(xs[0], 20, 1e-6, '开启裁剪后横线收缩到切点');
+            near(xs[1], 100, 1e-6);
           }
         },
         {

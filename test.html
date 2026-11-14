@@ -98,9 +98,9 @@
   <section class="checklist">
     <h2>移动端触摸功能测试（手动勾选）</h2>
     <label><input type="checkbox"><span>1. 绘制直线：点按起点 → 拖动查看虚线预览 → 点按终点，图形生成<span class="sub">预期：两次点按完成直线，虚线预览跟随手指，捕捉点显示菱形标记</span></span></label>
-    <label><input type="checkbox"><span>2. 绘制圆 / 圆弧 / 点<span class="sub">预期：圆为“圆心 + 半径点”，圆弧为“圆心 + 起点 + 终点（逆时针）”，点按立即生成</span></span></label>
+    <label><input type="checkbox"><span>2. 绘制圆 / 圆弧 / 点<span class="sub">预期：圆为“圆心 + 半径点”；圆弧为“两点 + 半径”（依次点两端点后输入半径确定，或第三次点按按当前半径生成，可切换劣弧/优弧）；点按立即生成</span></span></label>
     <label><input type="checkbox"><span>3. 坐标输入：直线输入起点 (10,10)、终点 (10,110)，圆输入圆心 (30,40)/半径 25，点输入 (-12.5,8)，分别点“确定”<span class="sub">预期：按输入值精确生成；空值/非数字标红并提示；直线起终点重合时拒绝生成</span></span></label>
-    <label><input type="checkbox"><span>4. 角度线与平行线<span class="sub">预期：角度线按参数角度生成长度线；平行线先点参考线，再输入偏移距离后“确定”（也可点通过点）</span></span></label>
+    <label><input type="checkbox"><span>4. 角度线与平行线<span class="sub">预期：角度线按参数角度生成长度线；平行线先点参考线，再在基准线任意一侧点按，或输入偏移距离并选择左/右/双侧后“确定”（双侧生成两条）</span></span></label>
     <label><input type="checkbox"><span>5. 视图手势：双指捏合缩放、双指拖动平移<span class="sub">预期：缩放以双指中点为锚点，平移跟手，无跳变</span></span></label>
     <label><input type="checkbox"><span>6. 双击空白自适应（选择工具）<span class="sub">预期：双击画布空白区域，所有图形完整显示并居中</span></span></label>
     <label><input type="checkbox"><span>7. 选择与框选<span class="sub">预期：点按单个图形高亮，拖动可框选多个，底部出现已选数量</span></span></label>
@@ -116,7 +116,7 @@
     <label><input type="checkbox"><span>17. 脚本控制台（&lt;/&gt;）<span class="sub">预期：运行示例脚本生成 6 个图元；错误命令给出错误行号</span></span></label>
     <label><input type="checkbox"><span>18. 旋转屏幕 / 窄屏适配<span class="sub">预期：横竖屏切换后画布自适应，工具栏不遮挡绘图区</span></span></label>
     <label><input type="checkbox"><span>19. 操作响应<span class="sub">预期：点按、拖动、缩放均即时响应，无明显卡顿（单帧 &lt; 100ms）</span></span></label>
-    <label><input type="checkbox"><span>20. 圆弧过渡<span class="sub">预期：编辑页选择“圆弧过渡”，依次点两条相交/相邻线段，设置半径后确定；生成相切圆弧，两条线保留且可继续编辑；半径过大或平行时给出提示</span></span></label>
+    <label><input type="checkbox"><span>20. 圆弧过渡<span class="sub">预期：编辑页选择“圆弧过渡”，依次点两条相交/相邻的直线或圆弧（直线-直线、直线-圆弧、圆弧-圆弧均可），设置半径与“裁剪”后确定；开启裁剪时原图形收缩到切点，关闭时保留原图形只新增过渡弧；接点处无断口；半径过大或平行时给出提示</span></span></label>
     <label><input type="checkbox"><span>21. 输入校验与键盘<span class="sub">预期：参数输入框弹出数字键盘；空值/非数字/负半径标红并提示，不会生成错误图形；点“确定”后焦点释放、画布无卡顿</span></span></label>
     <label><input type="checkbox"><span>22. 平移精确偏移与连续选择<span class="sub">预期：打开“连续选择”后点选多个图形，输入 X/Y 偏移（如 10/-5）并确定，所有选中对象同时平移；零偏移给出提示</span></span></label>
     <label><input type="checkbox"><span>23. 直线正交<span class="sub">预期：打开“正交”后拖动只生成水平/垂直直线，预览实时吸附；关闭后恢复任意角度</span></span></label>
@@ -125,10 +125,19 @@
     <label><input type="checkbox"><span>26. 坐标点集合<span class="sub">预期：查询页“坐标点”连续点选端点/中点/交点/圆心，面板自动汇总 P1..Pn 坐标列表，重复点被忽略</span></span></label>
     <label><input type="checkbox"><span>27. 矩阵与环形阵列<span class="sub">预期：编辑页选“阵列”，选中图形后切换阵型：矩形设置行数/列数/行距/列距，环形设置数量/总角度；环形打开“自定义圆心”可输入圆心坐标或点按画布空白处拾取，预览随之变化；确定后按规则生成副本、源对象保留；数量非法或超过 400 个副本时提示</span></span></label>
     <label><input type="checkbox"><span>28. 连续选择与关联选择<span class="sub">预期：选择工具打开“连续选择”后可逐个点按累加/取消选中，框选为追加；再打开“关联选择”时点按一段，自动带出端点相连的整条图形</span></span></label>
+    <label><input type="checkbox"><span>29. 等距线双侧与拐角<span class="sub">预期：选中矩形四条边、距离 10、位置“双侧”后确定，内外各生成一圈共 8 条等距线；拐角按斜接闭合，无超出角点的交叉线或断口</span></span></label>
+    <label><input type="checkbox"><span>30. 圆心智能捕捉<span class="sub">预期：画圆/点时靠近已有圆或圆弧的圆心，显示圆圈+十字标记与“圆心”标签，点按后落点精确在圆心</span></span></label>
+    <label><input type="checkbox"><span>31. 点工具圆心捕捉<span class="sub">预期：点工具下在圆/圆弧的圆周附近点按，自动生成该圆/圆弧的圆心点并提示“已捕捉圆心”</span></span></label>
+    <label><input type="checkbox"><span>32. 直线对象约束<span class="sub">预期：使用直线工具时，光标经过圆/圆弧自动出现“相切”开关，经过直线自动出现“垂直”开关；开启后拖动沿切线/垂线方向生成，经过另一图形时选项随之切换</span></span></label>
+    <label><input type="checkbox"><span>37. 直线终点自动捕捉<span class="sub">预期：确定起点后拖动/移动终点，靠近圆弧时终点吸附切点并显示“捕捉切点”，靠近直线时吸附垂足并显示“捕捉垂足”，状态栏实时显示捕捉类型；端点/中点/交点捕捉优先；参数区可切换捕捉阈值（12/18/24/36px），按 F3 或按住 Shift 可临时关闭捕捉，关闭后终点不吸附</span></span></label>
+    <label><input type="checkbox"><span>33. 镜像<span class="sub">预期：编辑页选“镜像”，点选若干图形后直接点按一条直线作为镜像轴，立即完成镜像；无需再点确定，原图保留并生成对称副本，完成后清空选择</span></span></label>
+    <label><input type="checkbox"><span>34. 等距线与圆弧连续<span class="sub">预期：同时选中首尾相连的直线与圆弧，设置距离并选“双侧”后确定；内外两侧都生成，接点处精确相接为连续线，无交叉、勾形或断口；链中有小半径圆弧导致该段无法偏移时，其余直线段仍正常生成并斜接，不会只剩一侧</span></span></label>
+    <label><input type="checkbox"><span>35. 交点捕捉<span class="sub">预期：绘制圆/点/直线时靠近两条图元的交点，显示“交点”捕捉标记，点按后落点精确在交点坐标</span></span></label>
+    <label><input type="checkbox"><span>36. 脚本修改已有图形<span class="sub">预期：脚本用 set 序号 参数 值 修改、move 序号 dx dy 平移、del 序号 删除；执行后画布与属性面板同步更新，可撤销；非法参数或越界序号报错且不写入</span></span></label>
   </section>
 
   <div class="note">
-    说明：自动化用例覆盖几何计算、裁剪/偏移/等距线去重/阵列/连续选择/圆弧过渡/正交/属性编辑/坐标点/链拾取算法、视图变换与脚本解析，可在任何浏览器直接运行；
+    说明：自动化用例覆盖几何计算、裁剪/偏移/等距线（链式斜接、双侧、直线+圆弧连续链、小圆弧容错）/阵列/镜像/连续选择/圆弧过渡（直线-圆弧、圆弧-圆弧、裁剪开关）/两点半径圆弧/直线相切与垂直/圆心与交点捕捉/正交/属性编辑/坐标点/链拾取算法、视图变换与脚本新建/修改/删除；
     触摸相关用例需在手机端（或浏览器设备模拟器）按清单逐项验证。截图或异常时请记录设备型号与浏览器版本。
   </div>
   <div class="env" id="env"></div>

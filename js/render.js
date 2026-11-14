@@ -308,14 +308,26 @@
     ctx.strokeStyle = COLORS.snap;
     ctx.fillStyle = 'rgba(55, 200, 255, 0.15)';
     ctx.lineWidth = 1.6;
-    ctx.beginPath();
-    ctx.moveTo(s.x, s.y - 8);
-    ctx.lineTo(s.x + 8, s.y);
-    ctx.lineTo(s.x, s.y + 8);
-    ctx.lineTo(s.x - 8, s.y);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
+    if (info.type === '圆心') {
+      // 圆心捕捉：圆圈 + 十字，和端点/中点标记区分
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, 8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(s.x - 12, s.y); ctx.lineTo(s.x + 12, s.y);
+      ctx.moveTo(s.x, s.y - 12); ctx.lineTo(s.x, s.y + 12);
+      ctx.stroke();
+    } else {
+      ctx.beginPath();
+      ctx.moveTo(s.x, s.y - 8);
+      ctx.lineTo(s.x + 8, s.y);
+      ctx.lineTo(s.x, s.y + 8);
+      ctx.lineTo(s.x - 8, s.y);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
     if (info.type) this.label(info.type, { x: s.x + 12, y: s.y + 18 }, COLORS.snap);
     ctx.restore();
   };

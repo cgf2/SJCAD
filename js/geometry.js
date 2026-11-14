@@ -317,6 +317,132 @@
     };
   }
 
+  /** 无限延长直线与圆的交点（不限制在线段范围内，用于圆角求心） */
+  function lineCircleInfinite(a1, a2, c, r) {
+    const dx = a2.x - a1.x, dy = a2.y - a1.y;
+    const fx = a1.x - c.x, fy = a1.y - c.y;
+    const A = dx * dx + dy * dy;
+    if (A < EPS) return [];
+    const B = 2 * (fx * dx + fy * dy);
+    const C = fx * fx + fy * fy - r * r;
+    let disc = B * B - 4 * A * C;
+    if (disc < -EPS) return [];
+    disc = Math.sqrt(Math.max(0, disc));
+    const out = [];
+    [(-B - disc) / (2 * A), (-B + disc) / (2 * A)].forEach(function (t) {
+      const q = P(a1.x + dx * t, a1.y + dy * t);
+      for (let i = 0; i < out.length; i++) if (dist2(out[i], q) < 1e-14) return;
+      out.push(q);
+    });
+    return out;
+  }
+
+  /** 通用圆角过渡：直线/圆/圆弧两两组合。
+   *  pick1 / pick2 为两图元上被点选的位置，用于保留拾取侧。
+   *  返回 { ent1, ent2, arc, tangent1, tangent2 } 或 { error }。 */
+  function filletCurves(e1, e2, r, pick1, pick2) {
+    if (!(r > 0)) return { error: '半径需大于 0' };
+    if (!e1 || !e2 || e1 === e2 || (e1.id != null && e1.id === e2.id)) return { error: '请选择两个不同的图形' };
+    const circleLike = function (e) { return e.type === 'circle' || e.type === 'arc'; };
+    if (!(e1.type === 'line' || circleLike(e1)) || !(e2.type === 'line' || circleLike(e2))) {
+      return { error: '仅支持直线与圆弧之间的过渡' };
+    }
+    if (e1.type === 'line' && e2.type === 'line') {
+      const res = filletLines(e1, e2, r, pick1, pick2);
+      if (res.error) return res;
+      return { ent1: res.line1, ent2: res.line2, arc: res.arc, tangent1: res.tangent1, tangent2: res.tangent2 };
+    }
+
+    function support(ent, d) {
+      if (ent.type === 'line') {
+        const u = unitVec(sub(ent.p2, ent.p1));
+        if (!u) return null;
+        const n = { x: -u.y, y: u.x };
+        return {
+          type: 'line',
+          a: P(ent.p1.x + n.x * d, ent.p1.y + n.y * d),
+          b: P(ent.p2.x + n.x * d, ent.p2.y + n.y * d)
+        };
+      }
+      const rr = ent.r + d;
+      return rr > EPS ? { type: 'circle', c: cloneP(ent.c), r: rr } : null;
+    }
+    function inter(s1, s2) {
+      if (!s1 || !s2) return [];
+      if (s1.type === 'line' && s2.type === 'line') {
+        const q = lineIntersectInfinite(s1.a, s1.b, s2.a, s2.b);
+        return q ? [q] : [];
+      }
+      if (s1.type === 'line') return lineCircleInfinite(s1.a, s1.b, s2.c, s2.r);
+      if (s2.type === 'line') return lineCircleInfinite(s2.a, s2.b, s1.c, s1.r);
+      return circleCircleIntersect(s1.c, s1.r, s2.c, s2.r);
+    }
+    /** 圆心到图元的垂足 / 最近点 */
+    function tangentOn(ent, ctr) {
+      if (ent.type === 'line') {
+        const u = unitVec(sub(ent.p2, ent.p1));
+        if (!u) return null;
+        const t = (ctr.x - ent.p1.x) * u.x + (ctr.y - ent.p1.y) * u.y;
+        return { x: ent.p1.x + u.x * t, y: ent.p1.y + u.y * t };
+      }
+      const u = unitVec(sub(ctr, ent.c));
+      if (!u) return null;
+      return { x: ent.c.x + u.x * ent.r, y: ent.c.y + u.y * ent.r };
+    }
+    function onEntity(ent, q) {
+      if (ent.type !== 'arc') return true;
+      return angleOnArc(angleOf(ent.c, q), ent);
+    }
+
+    let best = null, bestScore = Infinity;
+    [-r, r].forEach(function (d1) {
+      [-r, r].forEach(function (d2) {
+        const s1 = support(e1, d1), s2 = support(e2, d2);
+        inter(s1, s2).forEach(function (ctr) {
+          const t1 = tangentOn(e1, ctr);
+          const t2 = tangentOn(e2, ctr);
+          if (!t1 || !t2) return;
+          const score = dist(t1, pick1 || t1) + dist(t2, pick2 || t2);
+          const inRange = onEntity(e1, t1) && onEntity(e2, t2);
+          const total = score + (inRange ? 0 : 1e4);
+          if (total < bestScore) { bestScore = total; best = { ctr: ctr, t1: t1, t2: t2 }; }
+        });
+      });
+    });
+    if (!best) return { error: '无法生成过渡圆弧，请调整半径或拾取位置' };
+    const arcStart = best.t1, arcEnd = best.t2;
+    if (dist(arcStart, arcEnd) < 1e-7) return { error: '切点重合，请调整半径' };
+    const a0 = angleOf(best.ctr, arcStart);
+    const a1 = angleOf(best.ctr, arcEnd);
+    const arc = { type: 'arc', c: best.ctr, r: r, a0: a0, a1: a1, ccw: normAngle(a1 - a0) <= Math.PI };
+
+    function trim(ent, t, pick) {
+      const c = copyShape({ type: ent.type }, ent);
+      if (ent.type === 'line') {
+        if (dist(ent.p1, pick || ent.p1) <= dist(ent.p2, pick || ent.p2)) {
+          if (dist(ent.p1, t) < 1e-7) return null;
+          c.p2 = cloneP(t);
+        } else {
+          if (dist(ent.p2, t) < 1e-7) return null;
+          c.p1 = cloneP(t);
+        }
+      } else if (ent.type === 'arc') {
+        const keepStart = dist(arcStartOf(ent), pick || arcStartOf(ent)) <= dist(arcEndOf(ent), pick || arcEndOf(ent));
+        if (keepStart) c.a1 = angleOf(ent.c, t);
+        else c.a0 = angleOf(ent.c, t);
+        if (arcSweep(c) < 1e-6) return null;
+      }
+      return c;
+    }
+    function arcStartOf(e) { return polar(e.c, e.r, e.a0); }
+    function arcEndOf(e) { return polar(e.c, e.r, e.a1); }
+
+    const ent1 = trim(e1, best.t1, pick1);
+    const ent2 = trim(e2, best.t2, pick2);
+    if (!ent1 || !ent2) return { error: '过渡半径过大，图形剩余部分不足' };
+    return { ent1: ent1, ent2: ent2, arc: arc, tangent1: best.t1, tangent2: best.t2 };
+  }
+
   /** 可编辑属性的统一校验与写入；dryRun=true 时只校验不修改 */
   function setEntityProp(ent, key, value, dryRun) {
     if (!ent) return { ok: false, error: '图元不存在' };
@@ -540,6 +666,110 @@
     return false;
   }
 
+  /* ---------- 镜像 ---------- */
+  function mirrorPoint(p, a, b) {
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const l2 = dx * dx + dy * dy;
+    if (l2 < EPS) return cloneP(p);
+    const t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2;
+    const px = a.x + dx * t, py = a.y + dy * t;
+    return P(2 * px - p.x, 2 * py - p.y);
+  }
+
+  /** 以 a-b 直线为镜像轴生成对称图元副本 */
+  function mirrorEntity(ent, a, b) {
+    if (!ent || !a || !b || dist(a, b) < EPS) return null;
+    if (ent.type === 'line') {
+      return { type: 'line', p1: mirrorPoint(ent.p1, a, b), p2: mirrorPoint(ent.p2, a, b) };
+    }
+    if (ent.type === 'point') {
+      return { type: 'point', p: mirrorPoint(ent.p, a, b) };
+    }
+    if (ent.type === 'circle') {
+      return { type: 'circle', c: mirrorPoint(ent.c, a, b), r: ent.r };
+    }
+    if (ent.type === 'arc') {
+      const ax = Math.atan2(b.y - a.y, b.x - a.x);
+      return {
+        type: 'arc', c: mirrorPoint(ent.c, a, b), r: ent.r,
+        a0: normAngle(2 * ax - ent.a0), a1: normAngle(2 * ax - ent.a1), ccw: !ent.ccw
+      };
+    }
+    return null;
+  }
+
+  /* ---------- 两点 + 半径 生成圆弧 ---------- */
+  /** 由弦端点与半径求圆弧；major=true 取优弧，否则取劣弧 */
+  function arcFromChord(p1, p2, r, major) {
+    const d = dist(p1, p2);
+    if (!(r > 0) || d < EPS || r < d / 2 - 1e-9) return null;
+    const rr = Math.max(r, d / 2);
+    const mid = lerp(p1, p2, 0.5);
+    const h = Math.sqrt(Math.max(rr * rr - d * d / 4, 0));
+    const n = P(-(p2.y - p1.y) / d, (p2.x - p1.x) / d);
+    const c = add(mid, mul(n, h));
+    const a0 = angleOf(c, p1), a1 = angleOf(c, p2);
+    let ccw = normAngle(a1 - a0) <= Math.PI + 1e-9;
+    if (major) ccw = !ccw;
+    return { type: 'arc', c: c, r: rr, a0: a0, a1: a1, ccw: ccw };
+  }
+
+  /* ---------- 折线等距（斜接顶点，避免拐角交叉/断开） ---------- */
+  function polyArea(pts) {
+    let s = 0;
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i], b = pts[(i + 1) % pts.length];
+      s += a.x * b.y - b.x * a.y;
+    }
+    return s / 2;
+  }
+
+  /**
+   * 将折线整体等距偏移，拐角处按斜接（miter）求交，生成首尾衔接的线段集合。
+   * closed 为闭合链（矩形等）；d>0 沿各段左法向。
+   */
+  function offsetPolyline(pts, closed, d) {
+    const n = pts.length;
+    if (!closed && n < 2) return null;
+    if (closed && n < 3) return null;
+    const count = closed ? n : n - 1;
+    const nor = [];
+    for (let i = 0; i < count; i++) {
+      const a = pts[i], b = pts[(i + 1) % n];
+      const dx = b.x - a.x, dy = b.y - a.y, L = Math.hypot(dx, dy);
+      if (L < EPS) return null;
+      nor.push(P(-dy / L, dx / L));
+    }
+    function join(v, n1, n2) {
+      const sx = n1.x + n2.x, sy = n1.y + n2.y;
+      const sl = Math.hypot(sx, sy);
+      if (sl < 1e-6) return P(v.x + n1.x * d, v.y + n1.y * d);
+      const ux = sx / sl, uy = sy / sl;
+      const ch = Math.max(ux * n1.x + uy * n1.y, 0.2);
+      return P(v.x + ux * d / ch, v.y + uy * d / ch);
+    }
+    const verts = [];
+    if (closed) {
+      for (let i = 0; i < n; i++) verts.push(join(pts[i], nor[(i - 1 + count) % count], nor[i % count]));
+    } else {
+      verts.push(P(pts[0].x + nor[0].x * d, pts[0].y + nor[0].y * d));
+      for (let i = 1; i < n - 1; i++) verts.push(join(pts[i], nor[i - 1], nor[i]));
+      verts.push(P(pts[n - 1].x + nor[count - 1].x * d, pts[n - 1].y + nor[count - 1].y * d));
+    }
+    if (closed) {
+      const a0 = polyArea(pts), a1 = polyArea(verts);
+      if (Math.abs(a1) < 1e-9 || (a0 > 0) !== (a1 > 0)) return null;
+    }
+    const segs = [];
+    const total = closed ? verts.length : verts.length - 1;
+    for (let i = 0; i < total; i++) {
+      const a = verts[i], b = verts[(i + 1) % verts.length];
+      if (dist(a, b) < 1e-9) continue;
+      segs.push({ type: 'line', p1: cloneP(a), p2: cloneP(b) });
+    }
+    return segs.length ? segs : null;
+  }
+
   global.Geo = {
     EPS: EPS, TAU: TAU, DEG: DEG,
     P: P, cloneP: cloneP, add: add, sub: sub, mul: mul, lerp: lerp,
@@ -559,7 +789,10 @@
     hitDistance: hitDistance, entityBBox: entityBBox, bboxOf: bboxOf,
     translateEntity: translateEntity, rotatePoint: rotatePoint, rotateEntity: rotateEntity,
     copyShape: copyShape, offsetEntity: offsetEntity,
-    intersections: intersections, trimEntity: trimEntity,
+    mirrorPoint: mirrorPoint, mirrorEntity: mirrorEntity,
+    arcFromChord: arcFromChord, offsetPolyline: offsetPolyline,
+    intersections: intersections, trimEntity: trimEntity, filletCurves: filletCurves,
+    lineCircleInfinite: lineCircleInfinite,
     lineAngle: lineAngle, angleBetweenLines: angleBetweenLines,
     normalizeRect: normalizeRect, pointInRect: pointInRect,
     segmentIntersectsRect: segmentIntersectsRect

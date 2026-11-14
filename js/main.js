@@ -61,8 +61,9 @@
   App.snapPoint = function (p) {
     const tol = App.worldTol(15);
     let best = null, bestD = tol;
-    function consider(q, type) {
-      const d = Geo.dist(p, q);
+    /** prio 越大越优先：圆心捕捉给 1.6 倍权重，靠近圆/圆弧时优先吸附圆心 */
+    function consider(q, type, prio) {
+      const d = Geo.dist(p, q) / (prio || 1);
       if (d < bestD) { bestD = d; best = { p: q, type: type }; }
     }
     App.model.entities.forEach(function (e) {
@@ -71,10 +72,10 @@
         consider(e.p2, '端点');
         consider(Geo.lerp(e.p1, e.p2, 0.5), '中点');
       } else if (e.type === 'circle') {
-        consider(e.c, '圆心');
+        consider(e.c, '圆心', 1.6);
         for (let i = 0; i < 4; i++) consider(Geo.polar(e.c, e.r, i * Math.PI / 2), '象限点');
       } else if (e.type === 'arc') {
-        consider(e.c, '圆心');
+        consider(e.c, '圆心', 1.6);
         consider(Geo.arcStart(e), '端点');
         consider(Geo.arcEnd(e), '端点');
         consider(Geo.entityMidpoint(e), '中点');
@@ -82,6 +83,17 @@
         consider(e.p, '点');
       }
     });
+    // 交点捕捉：只对光标附近的图元两两求交，兼顾精度与性能
+    const near = [];
+    App.model.entities.forEach(function (e) {
+      if (e.type === 'point') return;
+      if (Geo.hitDistance(e, p) <= tol) near.push(e);
+    });
+    for (let i = 0; i < near.length; i++) {
+      for (let j = i + 1; j < near.length; j++) {
+        Geo.intersections(near[i], near[j]).forEach(function (q) { consider(q, '交点', 1.4); });
+      }
+    }
     if (best) {
       App.snapInfo = { p: best.p, type: best.type, t: performance.now() };
       if (App._snapTimer) clearTimeout(App._snapTimer);
@@ -794,25 +806,31 @@
     const before = App.model.entities.length;
     App.begin();
     const rep = window.CADScript.run(text, App.model);
-    if (App.model.entities.length !== before) {
+    const changed = App.model.entities.length !== before || rep.updated > 0 || rep.deleted > 0;
+    if (changed) {
       App.end();
       updateCount();
+      pruneSelection();
+      App.overlay = null;
+      App.afterSelectionChange();
+      App.refreshPropsPanel();
     } else {
       App.abort();
     }
     if (rep.errors.length) {
-      let html = '<div class="row"><span class="k">成功创建</span><span class="v">' + rep.created + '</span></div>';
+      let html = '<div class="row"><span class="k">新建 / 修改 / 删除</span><span class="v">' +
+        rep.created + ' / ' + rep.updated + ' / ' + rep.deleted + '</span></div>';
       rep.errors.forEach(function (err) {
         html += '<div class="row"><span class="k">第 ' + err.line + ' 行</span><span class="v">' +
           escapeHtml(err.message) + '</span></div>';
       });
-      html += '<div class="hint">请检查命令名与参数个数（空格或逗号分隔）。</div>';
+      html += '<div class="hint">请检查命令名与参数个数（空格或逗号分隔）；修改已有图形用 set/move/del + 图元序号。</div>';
       App.showInfo('脚本执行结果', html);
       App.refresh();
       return;
     }
     scriptModal.classList.add('hidden');
-    App.toast('脚本执行完成，创建 ' + rep.created + ' 个图元');
+    App.toast('脚本执行完成：新建 ' + rep.created + '，修改 ' + rep.updated + '，删除 ' + rep.deleted);
     if (rep.created > 0) App.zoomFit();
   }
 
@@ -1005,6 +1023,9 @@
     script: function (text) {
       const rep = window.CADScript.run(text, App.model);
       updateCount();
+      pruneSelection();
+      App.afterSelectionChange();
+      App.refreshPropsPanel();
       App.refresh();
       return rep;
     },
