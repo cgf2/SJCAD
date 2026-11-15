@@ -46,6 +46,7 @@
       begin: function () { this.undo.push(d.snapshot()); },
       end: function () {},
       abort: function () { this.undo.pop(); },
+      solveConstraints: function () { return global.CADConstraints ? global.CADConstraints.solve(this.model) : 0; },
       pick: function (p) { return d.hitTest(p, 12 / this.view.scale); },
       snapPoint: function (p) { return p; },
       toast: function (m) { this.toasts.push(m); },
@@ -57,6 +58,13 @@
       refresh: function () {},
       afterSelectionChange: function () {},
       showProps: function () { this.infos.push({ title: '图形属性', html: '可编辑' }); },
+      showDim: function (id) {
+        this.infos.push({ title: '尺寸标注', html: '<div data-dim="' + id + '"></div>' });
+        this.dimId = id;
+      },
+      showConstraintList: function () {
+        this.infos.push({ title: '几何约束', html: '列表' });
+      },
       worldTol: function (px) { return px / this.view.scale; },
       entityInfo: function () { return '<div class="row"><span class="k">类型</span><span class="v">桩</span></div>'; }
     };
@@ -1498,6 +1506,1037 @@
             assert(lastInfo(app).title === '图形属性');
             assert(lastInfo(app).html.indexOf('可编辑') >= 0, '属性面板应为可编辑模式');
             assert(app.model.selected.size === 1);
+          }
+        }
+      ]
+    },
+    {
+      name: '标注与几何约束',
+      cases: [
+        {
+          name: '圆工具：半径 / 直径切换实时换算且不中断绘制',
+          run: function () {
+            const app = mockApp();
+            const t = useTool('circle');
+            app.params.cx = 0;
+            app.params.cy = 0;
+            app.params.r = 50;
+            assert(app.params.rmode !== 'd', '默认应为半径输入');
+            t.onParamChange('rmode', 'd');
+            near(Number(app.params.r), 100, 1e-9, '半径 50 切换直径应为 100');
+            t.onTap({ x: 0, y: 0 });
+            assert(t.points.length === 1, '切换后圆心应保留');
+            t.onParamChange('rmode', 'r');
+            assert(t.points.length === 1, '再次切换不应中断绘制');
+            near(Number(app.params.r), 50, 1e-9, '直径 100 切回半径应为 50');
+            near(t._radius(), 50, 1e-9, '半径模式预览半径');
+
+            t.onParamChange('rmode', 'd');
+            near(t._radius(), 50, 1e-9, '直径 100 → 预览半径 50');
+            app.params.r = 100;
+            t.applyParams();
+            near(app.model.entities[0].r, 50, 1e-9, '输入直径 100 应生成半径 50 的圆');
+          }
+        },
+        {
+          name: '智能标注：自动识别与尺寸驱动',
+          run: function () {
+            const D = global.CADDims;
+            const d = docWith([line(0, 0, 100, 0)]);
+            const dim = d.addDim({ kind: 'length', entId: d.entities[0].id, offset: 20 });
+            near(D.valueOf(d, dim), 100, 1e-9, '线性标注值');
+            let r = D.setValue(d, dim, 150);
+            assert(r.ok, '线性尺寸驱动应成功');
+            near(Geo.dist(d.entities[0].p1, d.entities[0].p2), 150, 1e-9, '改值后直线长度为 150');
+
+            const c = d.add(circle(0, 0, 20));
+            const dim2 = d.addDim({ kind: 'diameter', entId: c.id });
+            near(D.valueOf(d, dim2), 40, 1e-9, '直径标注值');
+            assert(D.setValue(d, dim2, 100).ok);
+            near(c.r, 50, 1e-9, '直径驱动半径');
+            assert(dim2.kind === 'diameter' && dim2.entId === c.id, '标注记录类型与对象');
+
+            const a = d.add(arc(200, 0, 30, 0, Math.PI / 2));
+            const dim3 = d.addDim({ kind: 'radius', entId: a.id });
+            assert(D.setValue(d, dim3, 45).ok);
+            near(a.r, 45, 1e-9, '半径驱动');
+
+            assert(!D.setValue(d, dim, '0').ok, '零值应拒绝');
+            assert(!D.setValue(d, dim, 'abc').ok, '非数字应拒绝');
+            const html = D.infoHtml(d, dim);
+            assert(html.indexOf('data-dim') >= 0 && html.indexOf('150') >= 0, '面板应包含可编辑数值');
+          }
+        },
+        {
+          name: '标注线：命中检测、拖动偏移与数值联动',
+          run: function () {
+            const D = global.CADDims;
+            const d = docWith([line(0, 0, 100, 0)]);
+            const dim = d.addDim({ kind: 'length', entId: d.entities[0].id, offset: 2 });
+            const noop = function () {};
+            const ctx = {
+              save: noop, restore: noop, beginPath: noop, closePath: noop,
+              moveTo: noop, lineTo: noop, stroke: noop, fill: noop, fillText: noop,
+              setLineDash: noop, translate: noop, rotate: noop,
+              measureText: function (t) { return { width: String(t).length * 7 }; },
+              fillStyle: '', strokeStyle: '', lineWidth: 1, font: '', textAlign: '', textBaseline: ''
+            };
+            const R = {
+              ctx: ctx,
+              screen: function (p) { return { x: p.x * 10 + 100, y: p.y * 10 + 100 }; },
+              label: function (text, pt) { this.lastLabel = { text: text, pt: pt }; }
+            };
+            const app = {
+              model: d,
+              view: {
+                scale: 10,
+                toWorld: function (s) { return { x: (s.x - 100) / 10, y: (s.y - 100) / 10 }; }
+              },
+              params: { dshow: true, dortho: false },
+              renderer: R
+            };
+
+            D.draw(R, app);
+            assert(D.hitLine(app, { x: 600, y: 121 }, 4) === dim, '标注线范围内应命中');
+            assert(D.hitLine(app, { x: 600, y: 300 }, 4) === null, '标注线范围外不应命中');
+            const info0 = D.labelInfo(dim.id);
+            assert(info0 && info0.text === '100', '应缓存标注数值');
+
+            assert(D.moveLine(app, dim, { x: 50, y: 6 }) === true, '拖动应更新标注线偏移');
+            near(dim.offset, 6, 1e-9, '偏移距离应跟随拖动');
+            D.draw(R, app);
+            const info1 = D.labelInfo(dim.id);
+            assert(!dim.labelPos, '联动模式下不再冻结数值坐标');
+            near(info1.x, info0.x, 1e-9, '联动时数值 x 与标注线保持一致');
+            near(info1.y, info0.y + 40, 1e-9, '联动时数值 y 随标注线同步移动');
+            assert(D.hitLine(app, { x: 600, y: 161 }, 4) === dim, '新位置应命中标注线');
+            assert(D.hitLine(app, { x: 600, y: 121 }, 4) === null, '原位置不应再命中');
+
+            const dc = docWith([circle(0, 0, 50)]);
+            const cent = dc.entities[0].c;
+            const ddim = dc.addDim({ kind: 'diameter', entId: dc.entities[0].id });
+            const appC = {
+              model: dc, view: { scale: 10 }, params: { dshow: true, dortho: false },
+              renderer: R
+            };
+            D.draw(R, appC);
+            const dg0 = D.circleGeomFor(appC, dc.entities[0], ddim);
+            near(Geo.dist(dg0.tip, cent), 50, 1e-9, '默认箭头端点落在圆周');
+            near(dg0.tip.x, 50 * Math.SQRT1_2, 1e-9, '默认方向为 45°');
+            assert(!dg0.inside, '默认不进入圆内双向样式');
+
+            // 圆内：穿过圆心的完整双向箭头，两端落在两侧轮廓
+            assert(D.moveLine(appC, ddim, { x: 20, y: 30 }) === true, '直径标注应可拖动');
+            near(ddim.anchor.x, 20, 1e-9, '拖动落点 x 写入 anchor');
+            near(ddim.anchor.y, 30, 1e-9, '拖动落点 y 写入 anchor');
+            assert(!ddim.shift, '不再使用自由平移');
+            const dg1 = D.circleGeomFor(appC, dc.entities[0], ddim);
+            assert(dg1.inside, '落点在圆内应切换双向直径样式');
+            near(Geo.dist(dg1.tip, cent), 50, 1e-9, '圆内样式：箭头端点仍在圆周');
+            near(Geo.dist(dg1.back, cent), 50, 1e-9, '圆内样式：另一端也在圆周');
+            near(dg1.tip.x + dg1.back.x, 0, 1e-9, '双向箭头两端关于圆心对称 x');
+            near(dg1.tip.y + dg1.back.y, 0, 1e-9, '双向箭头两端关于圆心对称 y');
+            D.draw(R, appC);
+            const dinfo = D.labelInfo(ddim.id);
+            assert(dinfo && dinfo.text === '⌀100', '直径标注值');
+            const anchorS = R.screen(ddim.anchor);
+            near(dinfo.x, anchorS.x + 8, 1e-9, '圆内数值跟随落点 x');
+            near(dinfo.y, anchorS.y - 8, 1e-9, '圆内数值跟随落点 y');
+            assert(D.hitLine(appC, anchorS, 6) === ddim, '圆内直径线应可命中');
+
+            // 圆外四个象限：圆心固定、箭头端点固定在轮廓、方向随鼠标
+            [{ x: 120, y: 0 }, { x: 0, y: 120 }, { x: -120, y: 0 }, { x: 0, y: -120 }]
+              .forEach(function (q, i) {
+                assert(D.moveLine(appC, ddim, q) === true, '圆外拖动 ' + i);
+                const g = D.circleGeomFor(appC, dc.entities[0], ddim);
+                assert(!g.inside, '圆外不应进入双向样式');
+                near(Geo.dist(g.tip, cent), 50, 1e-9, '象限 ' + i + ' 箭头端点在圆周');
+                near(g.c.x, cent.x, 1e-9, '象限 ' + i + ' 圆心 x 不受鼠标影响');
+                near(g.c.y, cent.y, 1e-9, '象限 ' + i + ' 圆心 y 不受鼠标影响');
+                near(Math.cos(g.ang - Math.atan2(q.y, q.x)), 1, 1e-9, '象限 ' + i + ' 方向跟随落点');
+              });
+
+            // 圆弧：箭头方向被限制在弧上，圆心与半径端点保持锚定
+            const da = docWith([arc(0, 0, 30, 0, Math.PI / 2, true)]);
+            const arcEnt = da.entities[0];
+            const adim = da.addDim({ kind: 'radius', entId: arcEnt.id });
+            const appA = { model: da, view: { scale: 10 }, params: { dshow: true, dortho: false }, renderer: R };
+            const ag0 = D.circleGeomFor(appA, arcEnt, adim);
+            near(Geo.dist(ag0.tip, arcEnt.c), 30, 1e-9, '默认半径箭头在弧上');
+            assert(Geo.angleOnArc(Geo.angleOf(arcEnt.c, ag0.tip), arcEnt), '默认方向在弧范围内');
+            [{ x: 20, y: 20 }, { x: -90, y: 0 }, { x: 0, y: -90 }, { x: 90, y: 5 }]
+              .forEach(function (q, i) {
+                D.moveLine(appA, adim, q);
+                const g = D.circleGeomFor(appA, arcEnt, adim);
+                near(Geo.dist(g.tip, arcEnt.c), 30, 1e-9, '弧标注 ' + i + ' 箭头端点在弧上');
+                assert(Geo.angleOnArc(Geo.angleOf(g.c, g.tip), arcEnt), '弧标注 ' + i + ' 方向限制在弧内');
+                near(g.c.x, 0, 1e-9, '弧标注 ' + i + ' 圆心不变 x');
+                near(g.c.y, 0, 1e-9, '弧标注 ' + i + ' 圆心不变 y');
+              });
+            D.draw(R, appA);
+            const ainfo = D.labelInfo(adim.id);
+            assert(ainfo && ainfo.text === 'R30', '半径标注值');
+
+            app.params.dshow = false;
+            assert(D.hitLine(app, { x: 600, y: 161 }, 4) === null, '隐藏标注时不可命中');
+          }
+        },
+        {
+          name: '标注位置与偏移：快照恢复与查询重绘保持最新坐标',
+          run: function () {
+            const D = global.CADDims;
+            const d = docWith([line(0, 0, 80, 0)]);
+            const dim = d.addDim({ kind: 'length', entId: d.entities[0].id, offset: 16 });
+            dim.labelPos = { x: 30, y: 45 };
+            dim.anchor = { x: 4, y: 6 };
+            const snap = d.snapshot();
+            dim.labelPos = { x: 5, y: 5 };
+            dim.offset = 99;
+            dim.anchor = { x: 1, y: 2 };
+            d.restoreSnapshot(snap);
+            near(d.dims[0].labelPos.x, 30, 1e-9, '快照恢复后 x 坐标');
+            near(d.dims[0].labelPos.y, 45, 1e-9, '快照恢复后 y 坐标');
+            near(d.dims[0].offset, 16, 1e-9, '快照恢复后标注线偏移');
+            near(d.dims[0].anchor.x, 4, 1e-9, '快照恢复后锚点 x');
+            near(d.dims[0].anchor.y, 6, 1e-9, '快照恢复后锚点 y');
+
+            const noop = function () {};
+            const ctx = {
+              save: noop, restore: noop, beginPath: noop, closePath: noop,
+              moveTo: noop, lineTo: noop, stroke: noop, fill: noop, fillText: noop,
+              setLineDash: noop, translate: noop, rotate: noop,
+              measureText: function (t) { return { width: String(t).length * 7 }; },
+              fillStyle: '', strokeStyle: '', lineWidth: 1, font: '', textAlign: '', textBaseline: ''
+            };
+            const R = {
+              ctx: ctx,
+              screen: function (p) { return { x: p.x * 2 + 50, y: p.y * 2 + 50 }; },
+              label: noop
+            };
+            const app = { model: d, view: { scale: 2 }, params: { dshow: true, dortho: false }, renderer: R };
+            D.draw(R, app);
+            const info = D.labelInfo(d.dims[0].id);
+            near(info.x, 110, 1e-9, '重绘后保持 x');
+            near(info.y, 140, 1e-9, '重绘后保持 y');
+          }
+        },
+        {
+          name: '平行距离标注：识别、几何、拖动与样式',
+          run: function () {
+            const D = global.CADDims;
+            const noop = function () {};
+            const ctx = {
+              save: noop, restore: noop, beginPath: noop, closePath: noop,
+              moveTo: noop, lineTo: noop, stroke: noop, fill: noop, fillText: noop,
+              setLineDash: noop, translate: noop, rotate: noop,
+              measureText: function (t) { return { width: String(t).length * 7 }; },
+              fillStyle: '', strokeStyle: '', lineWidth: 1, font: '', textAlign: '', textBaseline: ''
+            };
+            const R = {
+              ctx: ctx,
+              screen: function (p) { return { x: p.x * 2 + 50, y: p.y * 2 + 50 }; },
+              label: noop
+            };
+
+            // 平行校验：平行 / 非平行 / 非直线
+            const d = docWith([
+              line(0, 0, 100, 0),
+              line(0, 20, 100, 20),
+              line(0, 0, 0, 100)
+            ]);
+            const A = d.entities[0], B = d.entities[1], C = d.entities[2];
+            const chk = D.parallelCheck(A, B);
+            assert(chk.ok, '水平平行线应通过校验');
+            near(chk.d, 20, 1e-9, '平行距离');
+            const bad = D.parallelCheck(A, C);
+            assert(!bad.ok, '垂直相交线不应通过平行校验');
+            assert(/不平行/.test(bad.error), '非平行提示应明确');
+            assert(!D.parallelCheck(A, { type: 'circle', c: { x: 0, y: 0 }, r: 5 }).ok, '圆不参与平行距离标注');
+
+            // 重叠区间：默认尺寸线位于有效重叠区间中点
+            const dim = d.addDim({ kind: 'pdist', ids: [A.id, B.id] });
+            const g = D.parallelGeomFor(d, dim);
+            assert(g && g.mode === 'overlap', '应识别线段重叠区间');
+            near(g.d, 20, 1e-9, '重叠区间距离');
+            near(g.mid, 50, 1e-9, '默认区间中点');
+            near(g.pa.y, 0, 1e-9, '尺寸线起点落在第一条线上');
+            near(g.pb.y, 20, 1e-9, '尺寸线终点落在第二条线上');
+            near(D.valueOf(d, dim), 20, 1e-9, '标注数值');
+
+            // 不同长度 / 部分重叠：只标注有效重叠区间
+            const d2 = docWith([line(0, 0, 100, 0), line(40, 10, 60, 10)]);
+            const dim2 = d2.addDim({ kind: 'pdist', ids: [d2.entities[0].id, d2.entities[1].id] });
+            const g2 = D.parallelGeomFor(d2, dim2);
+            near(g2.d, 10, 1e-9, '不同长度间距');
+            near(g2.mid, 50, 1e-9, '部分重叠取交集中点');
+
+            // 倾斜 30° 等距平行线
+            const ca = Math.cos(Math.PI / 6), sa = Math.sin(Math.PI / 6);
+            const d3 = docWith([
+              line(0, 0, ca * 100, sa * 100),
+              line(-sa * 15, ca * 15, ca * 100 - sa * 15, sa * 100 + ca * 15)
+            ]);
+            const dim3 = d3.addDim({ kind: 'pdist', ids: [d3.entities[0].id, d3.entities[1].id] });
+            const g3 = D.parallelGeomFor(d3, dim3);
+            near(g3.d, 15, 1e-9, '30° 平行线垂直距离');
+            near(Geo.dist(g3.pa, d3.entities[0].p1), 50, 1e-9, '倾斜尺寸线落在有效区间中点');
+
+            // 延长线平行：无投影重叠时取最近端点之间的有效区间
+            const d4 = docWith([line(0, 0, 50, 0), line(80, 30, 120, 30)]);
+            const dim4 = d4.addDim({ kind: 'pdist', ids: [d4.entities[0].id, d4.entities[1].id] });
+            const g4 = D.parallelGeomFor(d4, dim4);
+            assert(g4 && g4.mode === 'extend', '无重叠应识别为延长线平行区间');
+            near(g4.d, 30, 1e-9, '延长线平行距离');
+            near(g4.t, 65, 1e-9, '默认定位在最近端点区间中点');
+            assert(!g4.insideA && !g4.insideB, '定位点应落在延长线上');
+
+            // 拖动只改变显示位置，不改变距离
+            const app = { model: d, view: { scale: 2 }, params: { dshow: true, dortho: false }, renderer: R };
+            assert(D.moveLine(app, dim, { x: 30, y: -80 }) === true, '平行距离标注应可拖动');
+            near(dim.param, 30, 1e-9, '拖动写入显示位置');
+            const g5 = D.parallelGeomFor(d, dim);
+            near(g5.d, 20, 1e-9, '拖动后距离不变');
+            assert(D.moveLine(app, dim, { x: 500, y: 0 }) === true, '越界拖动应被限制');
+            near(dim.param, 100, 1e-9, '显示位置限制在有效范围');
+
+            // 绘制 + 命中检测 + 数值文本
+            D.draw(R, app);
+            const info = D.labelInfo(dim.id);
+            assert(info && info.text === '20', '平行距离数值文本');
+            const midS = R.screen({ x: dim.param, y: 10 });
+            assert(D.hitLine(app, midS, 6) === dim, '尺寸线可命中');
+
+            // 样式自定义与校验
+            assert(D.setStyle(dim, 'font', 'mono').ok, '字体设置');
+            assert(D.setStyle(dim, 'size', 18).ok, '字号设置');
+            assert(D.setStyle(dim, 'color', '#ff8800').ok, '文字颜色设置');
+            assert(D.setStyle(dim, 'dash', 'dash').ok, '尺寸线线型设置');
+            assert(!D.setStyle(dim, 'size', 100).ok, '非法字号应拒绝');
+            assert(!D.setStyle(dim, 'color', 'red').ok, '非法颜色应拒绝');
+            assert(!D.setStyle(dim, 'font', 'comic').ok, '非法字体应拒绝');
+            D.draw(R, app);
+            assert(D.labelInfo(dim.id).text === '20', '样式修改后数值不变');
+
+            // 查找已有标注（顺序无关）与快照恢复
+            assert(D.findParallelFor(d, B.id, A.id) === dim, '反序查找应命中同一标注');
+            const snap = d.snapshot();
+            dim.param = 10;
+            dim.style.size = 12;
+            d.restoreSnapshot(snap);
+            near(d.dims[0].param, 100, 1e-9, '快照恢复显示位置');
+            near(d.dims[0].style.size, 18, 1e-9, '快照恢复样式');
+            assert(!D.setValue(d, d.dims[0], 30, false).ok, '平行距离为测量值，不支持尺寸驱动');
+          }
+        },
+        {
+          name: '约束求解：水平 / 垂直',
+          run: function () {
+            const C = global.CADConstraints;
+            const d = docWith([line(0, 0, 100, 50)]);
+            const id = d.entities[0].id;
+            const L0 = Math.hypot(100, 50);
+            d.addConstraint({ type: 'horizontal', ids: [id] });
+            C.solve(d);
+            near(d.entities[0].p2.y, 0, 1e-9, '水平约束终点 y');
+            near(Geo.dist(d.entities[0].p1, d.entities[0].p2), L0, 1e-9, '水平约束保持长度');
+
+            const d2 = docWith([line(0, 0, 30, -80)]);
+            d2.addConstraint({ type: 'vertical', ids: [d2.entities[0].id] });
+            C.solve(d2);
+            near(d2.entities[0].p2.x, 0, 1e-9, '垂直约束终点 x');
+            near(d2.entities[0].p2.y, -Math.hypot(30, 80), 1e-9, '垂直约束保持长度与方向');
+          }
+        },
+        {
+          name: '约束求解：对称 / 共线',
+          run: function () {
+            const C = global.CADConstraints;
+            const d = docWith([
+              circle(0, 0, 10),
+              circle(30, 5, 10),
+              line(50, -100, 50, 100)
+            ]);
+            d.addConstraint({
+              type: 'symmetric',
+              ids: [d.entities[0].id, d.entities[1].id],
+              axisId: d.entities[2].id
+            });
+            C.solve(d);
+            near(d.entities[1].c.x, 100, 1e-9, '对称后圆心 x');
+            near(d.entities[1].c.y, 0, 1e-9, '对称后圆心 y');
+            near(d.entities[1].r, 10, 1e-9, '对称不改半径');
+
+            const d2 = docWith([line(0, 0, 100, 0), line(0, 50, 50, 80)]);
+            const L1 = Math.hypot(50, 30);
+            d2.addConstraint({ type: 'collinear', ids: [d2.entities[0].id, d2.entities[1].id] });
+            C.solve(d2);
+            near(d2.entities[1].p1.y, 0, 1e-9, '共线后起点在基准线上');
+            near(d2.entities[1].p2.y, 0, 1e-9, '共线后终点在基准线上');
+            near(Geo.dist(d2.entities[1].p1, d2.entities[1].p2), L1, 1e-9, '共线保持长度');
+          }
+        },
+        {
+          name: '约束求解：相切 / 距离',
+          run: function () {
+            const C = global.CADConstraints;
+            const d = docWith([circle(0, 0, 20), circle(100, 0, 10)]);
+            d.addConstraint({ type: 'tangent', ids: [d.entities[0].id, d.entities[1].id] });
+            C.solve(d);
+            near(Geo.dist(d.entities[0].c, d.entities[1].c), 30, 1e-9, '两圆外切圆心距');
+
+            const d2 = docWith([circle(0, 30, 20), line(-100, 0, 100, 0)]);
+            d2.addConstraint({ type: 'tangent', ids: [d2.entities[0].id, d2.entities[1].id] });
+            C.solve(d2);
+            near(Math.abs(d2.entities[0].c.y), 20, 1e-9, '圆与直线相切时圆心到直线距离等于半径');
+
+            const d3 = docWith([
+              { type: 'point', p: { x: 0, y: 0 } },
+              { type: 'point', p: { x: 10, y: 0 } }
+            ]);
+            d3.addConstraint({ type: 'distance', ids: [d3.entities[0].id, d3.entities[1].id], value: 50 });
+            C.solve(d3);
+            near(d3.entities[1].p.x, 50, 1e-9, '距离约束固定为 50');
+            near(d3.entities[1].p.y, 0, 1e-9);
+          }
+        },
+        {
+          name: '约束预览不修改原图 / 列表 / 失效清理',
+          run: function () {
+            const C = global.CADConstraints;
+            const d = docWith([line(0, 0, 100, 50)]);
+            const id = d.entities[0].id;
+            const ghosts = C.preview(d, { type: 'horizontal', ids: [id] });
+            assert(ghosts.length === 1, '应返回 1 个预览副本');
+            near(ghosts[0].p2.y, 0, 1e-9, '预览副本已水平');
+            near(d.entities[0].p2.y, 50, 1e-9, '预览不改变原图');
+
+            const con = d.addConstraint({ type: 'horizontal', ids: [id] });
+            const html = C.listHtml(d);
+            assert(html.indexOf('水平') >= 0 && html.indexOf('删除') >= 0, '约束列表应含类型与删除');
+            assert(d.findConstraint(con.id), '应能按 id 查找约束');
+
+            d.remove(id);
+            assert(d.pruneRefs(), '删除图元后应清理引用');
+            assert(d.constraints.length === 0, '关联约束应被移除');
+            assert(d.dims.length === 0, '关联标注应被移除');
+          }
+        },
+        {
+          name: '约束工具：水平点按 / 距离编辑',
+          run: function () {
+            const app = mockApp();
+            app.model.add(line(0, 0, 100, 50));
+            const t = useTool('ch');
+            t.onTap({ x: 50, y: 25 });
+            assert(app.model.constraints.length === 1, '应新增水平约束');
+            near(app.model.entities[0].p2.y, 0, 1e-9, '水平工具应立即生效');
+
+            const app2 = mockApp();
+            app2.model.add({ type: 'point', p: { x: 0, y: 0 } });
+            app2.model.add({ type: 'point', p: { x: 10, y: 0 } });
+            const t2 = useTool('cdist');
+            t2.onTap({ x: 0, y: 0 });
+            t2.onTap({ x: 10, y: 0 });
+            assert(app2.model.constraints.length === 1, '应新增距离约束');
+            const con = app2.model.constraints[0];
+            near(con.value, 10, 1e-9, '默认按当前间距固定');
+
+            app2.begin();
+            con.value = 40;
+            global.CADConstraints.solve(app2.model);
+            app2.end();
+            near(app2.model.entities[1].p.x, 40, 1e-9, '修改距离值后图形同步');
+          }
+        },
+        {
+          name: '直线：连续画线与圆弧方向吸附',
+          run: function () {
+            const app = mockApp();
+            const t = useTool('line');
+            app.params.lchain = true;
+            t.onTap({ x: 0, y: 0 });
+            t.onTap({ x: 100, y: 0 });
+            assert(app.model.entities.length === 1, '应先完成第一条直线');
+            assert(t.points.length === 1, '连续模式应以终点作为新起点');
+            near(t.points[0].x, 100, 1e-9, '新起点 x = 上一条终点 x');
+            near(t.points[0].y, 0, 1e-9, '新起点 y = 上一条终点 y');
+            t.onTap({ x: 100, y: 60 });
+            assert(app.model.entities.length === 2, '应连续生成第二条直线');
+            near(app.model.entities[1].p1.x, 100, 1e-9, '第二条直线与第一条首尾相连');
+            near(app.model.entities[1].p1.y, 0, 1e-9);
+            near(app.model.entities[1].p2.y, 60, 1e-9);
+            t.onRightClick();
+            assert(app.params.lchain === false && t.points.length === 0, '右键应退出连续画线并取消当前直线');
+
+            // 起点在圆上 → 法线 / 切线方向吸附
+            const app2 = mockApp();
+            app2.model.add(circle(0, 0, 50));
+            const t2 = useTool('line');
+            t2.onTap({ x: 50, y: 0 });
+            assert(app2.params.larc === true, '起点在圆上应显示方向吸附');
+            app2.params.lalign = 'normal';
+            t2.onTap({ x: 90, y: 80 });
+            near(app2.model.entities[1].p2.y, 0, 1e-6, '法线吸附终点应落在半径方向');
+            near(app2.model.entities[1].p2.x, 90, 1e-6);
+
+            const app3 = mockApp();
+            app3.model.add(circle(0, 0, 50));
+            const t3 = useTool('line');
+            t3.onTap({ x: 50, y: 0 });
+            app3.params.lalign = 'tangent';
+            t3.onTap({ x: 90, y: 80 });
+            near(app3.model.entities[1].p2.x, 50, 1e-6, '切线吸附终点 x 固定');
+            near(app3.model.entities[1].p2.y, 80, 1e-6, '切线吸附终点沿 y 方向');
+          }
+        },
+        {
+          name: '角度标注：两条直线的夹角与尺寸驱动',
+          run: function () {
+            const D = global.CADDims;
+            const d = docWith([line(0, 0, 100, 0), line(0, 0, 0, 100)]);
+            const dim = d.addDim({
+              kind: 'angle', ids: [d.entities[0].id, d.entities[1].id], offset: 30
+            });
+            near(D.valueOf(d, dim), 90, 1e-6, '两条垂直直线夹角');
+            assert(D.findAngleFor(d, dim.ids[1], dim.ids[0]) === dim, '角度标注可按顺序无关查找');
+            const g = D.angleGeomFor(d, dim);
+            assert(g && g.v && Math.abs(g.v.x) < 1e-9 && Math.abs(g.v.y) < 1e-9, '角度顶点在交点');
+
+            assert(D.setValue(d, dim, 45).ok, '角度驱动应成功');
+            near(D.valueOf(d, dim), 45, 1e-6, '驱动后夹角为 45°');
+            assert(!D.setValue(d, dim, 0).ok && !D.setValue(d, dim, 180).ok, '角度需在 0~180° 之间');
+            assert(D.infoHtml(d, dim).indexOf('角度') >= 0, '角度标注面板应显示角度');
+            assert(D.nameOf('angle') === '角度标注', '名称应为角度标注');
+
+            assert(!D.angleGeomFor(d, { kind: 'angle', ids: [d.entities[0].id, 999] }), '缺失图元应返回空');
+          }
+        },
+        {
+          name: '约束求解：平行 / 角度',
+          run: function () {
+            const C = global.CADConstraints;
+            const d = docWith([line(0, 0, 100, 0), line(0, 50, 50, 80)]);
+            d.addConstraint({ type: 'parallel', ids: [d.entities[0].id, d.entities[1].id] });
+            C.solve(d);
+            const a = d.entities[0], b = d.entities[1];
+            const cross = (a.p2.x - a.p1.x) * (b.p2.y - b.p1.y) - (a.p2.y - a.p1.y) * (b.p2.x - b.p1.x);
+            near(cross, 0, 1e-6, '平行约束后方向叉积为 0');
+            near(Geo.dist(b.p1, b.p2), Math.hypot(50, 30), 1e-9, '平行约束保持第二条长度');
+
+            const d2 = docWith([line(0, 0, 100, 0), line(0, 0, 0, 100)]);
+            d2.addConstraint({ type: 'angle', ids: [d2.entities[0].id, d2.entities[1].id], value: 60 });
+            C.solve(d2);
+            const a2 = d2.entities[0], b2 = d2.entities[1];
+            const la = Geo.dist(a2.p1, a2.p2), lb = Geo.dist(b2.p1, b2.p2);
+            const da = { x: (a2.p2.x - a2.p1.x) / la, y: (a2.p2.y - a2.p1.y) / la };
+            const db = { x: (b2.p2.x - b2.p1.x) / lb, y: (b2.p2.y - b2.p1.y) / lb };
+            near(Geo.deg(Math.acos(Geo.clamp(da.x * db.x + da.y * db.y, -1, 1))), 60, 1e-6, '角度约束后夹角为 60°');
+          }
+        },
+        {
+          name: '约束求解：固定 / 点在线上 / 圆取圆心',
+          run: function () {
+            const C = global.CADConstraints;
+            // 固定：被固定图形不参与移动
+            const d = docWith([
+              { type: 'point', p: { x: 0, y: 0 } },
+              { type: 'point', p: { x: 10, y: 0 } }
+            ]);
+            d.addConstraint({ type: 'fixed', ids: [d.entities[1].id] });
+            d.addConstraint({ type: 'distance', ids: [d.entities[0].id, d.entities[1].id], value: 50 });
+            C.solve(d);
+            near(d.entities[1].p.x, 10, 1e-9, '固定点不被距离约束移动');
+            near(d.entities[0].p.x, 0, 1e-9, '另一端保持不动');
+
+            // 点在线上：圆自动取圆心
+            const d2 = docWith([circle(30, 25, 12), line(-100, 0, 100, 0)]);
+            d2.addConstraint({ type: 'onLine', ids: [d2.entities[0].id, d2.entities[1].id] });
+            C.solve(d2);
+            near(d2.entities[0].c.y, 0, 1e-9, '圆心被投影到直线上');
+            near(d2.entities[0].c.x, 30, 1e-9, '投影保持沿直线方向位置');
+            near(d2.entities[0].r, 12, 1e-9, '点在线上不改变半径');
+
+            // 共线：圆自动取圆心
+            const d3 = docWith([line(0, 0, 100, 0), circle(40, 30, 10)]);
+            d3.addConstraint({ type: 'collinear', ids: [d3.entities[0].id, d3.entities[1].id] });
+            C.solve(d3);
+            near(d3.entities[1].c.y, 0, 1e-9, '共线时圆心落到基准线');
+            near(d3.entities[1].c.x, 40, 1e-9, '共线保持圆心沿线位置');
+
+            // 距离：圆取圆心
+            const d4 = docWith([circle(0, 0, 10), circle(10, 0, 10)]);
+            d4.addConstraint({ type: 'distance', ids: [d4.entities[0].id, d4.entities[1].id], value: 80 });
+            C.solve(d4);
+            near(Geo.dist(d4.entities[0].c, d4.entities[1].c), 80, 1e-9, '圆距离按圆心计算');
+          }
+        },
+        {
+          name: '新增约束工具：平行 / 固定 / 角度 / 点在线上',
+          run: function () {
+            const app = mockApp();
+            app.model.add(line(0, 0, 100, 0));
+            app.model.add(line(0, 50, 50, 80));
+            const tp = useTool('cpar');
+            tp.onTap({ x: 50, y: 0 });
+            tp.onTap({ x: 25, y: 65 });
+            assert(app.model.constraints.length === 1 && app.model.constraints[0].type === 'parallel', '平行工具应添加约束');
+
+            const app2 = mockApp();
+            app2.model.add(circle(0, 0, 20));
+            const tf = useTool('cfix');
+            tf.onTap({ x: 20, y: 0 });
+            assert(app2.model.constraints[0].type === 'fixed', '固定工具应添加约束');
+            tf.onTap({ x: 20, y: 0 });
+            assert(app2.model.constraints.length === 1, '重复固定同一图形应提示且不重复添加');
+
+            const app3 = mockApp();
+            app3.model.add(line(0, 0, 100, 0));
+            app3.model.add(line(0, 0, 0, 100));
+            app3.params.av = 30;
+            const ta = useTool('cang');
+            ta.onTap({ x: 50, y: 0 });
+            ta.onTap({ x: 0, y: 50 });
+            assert(app3.model.constraints[0].type === 'angle', '角度工具应添加约束');
+            near(app3.model.constraints[0].value, 90, 1e-6, '未改面板值时按当前夹角固定');
+
+            const app4 = mockApp();
+            app4.model.add(circle(20, 30, 10));
+            app4.model.add(line(-100, 0, 100, 0));
+            const tl = useTool('conl');
+            tl.onTap({ x: 30, y: 30 });
+            tl.onTap({ x: 0, y: 0 });
+            assert(app4.model.constraints[0].type === 'onLine', '点在线上工具应添加约束');
+            near(app4.model.entities[0].c.y, 0, 1e-9, '圆心应立即投影到直线');
+          }
+        }
+      ]
+    },
+    {
+      name: '矩形 / 多边形 / 重叠约束',
+      cases: [
+        {
+          name: '矩形几何、包围盒与拾取',
+          run: function () {
+            const r = { type: 'rect', x1: 0, y1: 0, x2: 100, y2: 50, style: 'solid', fill: 'blue' };
+            assert(Geo.entityPolyline(r).length === 5, '矩形应返回闭合的 5 个点');
+            const b = Geo.entityBBox(r);
+            near(b.x1, 0); near(b.y1, 0); near(b.x2, 100); near(b.y2, 50);
+            near(Geo.entityLength(r), 300, 1e-9, '矩形周长');
+            const mid = Geo.entityMidpoint(r);
+            near(mid.x, 50); near(mid.y, 25);
+            near(Geo.hitDistance(r, { x: 50, y: 0 }), 0, 1e-9, '边上距离');
+            near(Geo.hitDistance(r, { x: 120, y: 25 }), 20, 1e-9, '边外距离');
+            assert(Geo.entityEndpoints(r).length === 4, '矩形应有 4 个角点');
+          }
+        },
+        {
+          name: '多边形面积、周长、包围盒与圆交点',
+          run: function () {
+            const p = {
+              type: 'poly', closed: true,
+              pts: [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }, { x: 0, y: 100 }]
+            };
+            near(Math.abs(Geo.polyArea(p.pts)), 10000, 1e-9, '正方形面积');
+            near(Geo.entityLength(p), 400, 1e-9, '正方形周长');
+            const b = Geo.entityBBox(p);
+            near(b.x2 - b.x1, 100); near(b.y2 - b.y1, 100);
+            near(Geo.hitDistance(p, { x: 50, y: 50 }), 50, 1e-9, '内部到边距离');
+            const pts = Geo.intersections(p, circle(50, 0, 20));
+            assert(pts.length === 2, '多边形边与圆应有两个交点，实际 ' + pts.length);
+          }
+        },
+        {
+          name: '矩形 / 多边形平移、旋转、镜像与复制',
+          run: function () {
+            const r = { type: 'rect', x1: 0, y1: 0, x2: 100, y2: 50 };
+            Geo.translateEntity(r, 10, 20);
+            near(r.x1, 10); near(r.y1, 20); near(r.x2, 110); near(r.y2, 70);
+
+            const r90 = { type: 'rect', x1: 0, y1: 0, x2: 100, y2: 50 };
+            Geo.rotateEntity(r90, { x: 0, y: 0 }, Math.PI / 2);
+            assert(r90.type === 'rect', '旋转 90° 后仍应为矩形');
+            near(r90.x1, -50, 1e-9); near(r90.y1, 0, 1e-9);
+            near(r90.x2, 0, 1e-9); near(r90.y2, 100, 1e-9);
+
+            const r45 = { type: 'rect', x1: 0, y1: 0, x2: 100, y2: 50 };
+            Geo.rotateEntity(r45, { x: 0, y: 0 }, Math.PI / 4);
+            assert(r45.type === 'poly', '非 90° 旋转应转换为多边形');
+
+            const rm = Geo.mirrorEntity({ type: 'rect', x1: 10, y1: 0, x2: 30, y2: 20 },
+              { x: 0, y: 0 }, { x: 0, y: 100 });
+            assert(rm.type === 'rect', '沿垂直轴镜像矩形仍应为矩形');
+            near(rm.x1, -30, 1e-9); near(rm.x2, -10, 1e-9);
+
+            const p = { type: 'poly', closed: true, pts: [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 0, y: 10 }] };
+            const cp = Geo.copyShape({}, p);
+            near(cp.pts[1].x, 10);
+            cp.pts[1].x = 99;
+            near(p.pts[1].x, 10, 1e-9, '复制应为深拷贝');
+          }
+        },
+        {
+          name: '矩形 / 多边形属性编辑',
+          run: function () {
+            const r = { type: 'rect', x1: 0, y1: 0, x2: 100, y2: 50 };
+            assert(Geo.setEntityProp(r, 'w', 200).ok, '修改宽度应成功');
+            near(r.x2 - r.x1, 200);
+            assert(Geo.setEntityProp(r, 'x2', 50).ok, '修改右边界应成功');
+            near(r.x2 - r.x1, 50);
+            assert(!Geo.setEntityProp(r, 'w', 0).ok, '宽度 0 应被拒绝');
+
+            const p = {
+              type: 'poly', closed: true,
+              pts: [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }, { x: 0, y: 100 }]
+            };
+            assert(Geo.setEntityProp(p, 'v1x', 150).ok, '修改顶点应成功');
+            near(p.pts[1].x, 150);
+            assert(!Geo.setEntityProp(p, 'v9x', 10).ok, '不存在的顶点应被拒绝');
+          }
+        },
+        {
+          name: '矩形工具：点按创建与参数精确创建',
+          run: function () {
+            const app = mockApp();
+            const t = useTool('rect');
+            t.onTap({ x: 0, y: 0 });
+            t.onTap({ x: 120, y: 80 });
+            assert(app.model.entities.length === 1, '点按两个角点应生成矩形');
+            const r = app.model.entities[0];
+            assert(r.type === 'rect', '类型应为矩形');
+            near(r.x2 - r.x1, 120); near(r.y2 - r.y1, 80);
+            assert(r.style === 'solid' && r.fill === 'none', '默认实线无填充');
+
+            app.params.x1 = 10; app.params.y1 = 20;
+            app.params.w = 30; app.params.h = 40;
+            app.params.rstyle = 'dashed'; app.params.rfill = 'green';
+            t.reset();
+            t.applyParams();
+            assert(app.model.entities.length === 2, '参数应精确创建一个矩形');
+            const r2 = app.model.entities[1];
+            near(r2.x1, 10); near(r2.y1, 20); near(r2.x2, 40); near(r2.y2, 60);
+            assert(r2.style === 'dashed' && r2.fill === 'green', '边框与填充应生效');
+          }
+        },
+        {
+          name: '多边形工具：自由顶点、自动闭合与边数预设',
+          run: function () {
+            const app = mockApp();
+            const t = useTool('poly');
+            t.onTap({ x: 0, y: 0 });
+            t.onTap({ x: 100, y: 0 });
+            t.onTap({ x: 100, y: 100 });
+            t.onTap({ x: 0, y: 100 });
+            t.onTap({ x: 0, y: 0 });
+            assert(app.model.entities.length === 1, '点回起点应闭合生成多边形');
+            const p = app.model.entities[0];
+            assert(p.type === 'poly' && p.closed !== false, '应为闭合多边形');
+            assert(p.pts.length === 4, '应有 4 个顶点');
+
+            t.reset();
+            app.params.psides = '6';
+            app.params.prad = 50;
+            t.onTap({ x: 200, y: 200 });
+            assert(app.model.entities.length === 2, '边数预设应生成正多边形');
+            const hex = app.model.entities[1];
+            assert(hex.pts.length === 6, '正六边形应有 6 个顶点');
+            hex.pts.forEach(function (q) { near(Geo.dist({ x: 200, y: 200 }, q), 50, 1e-6, '外接圆半径'); });
+          }
+        },
+        {
+          name: '多边形顶点编辑',
+          run: function () {
+            const app = mockApp();
+            app.model.add({
+              type: 'poly', closed: true,
+              pts: [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }, { x: 0, y: 100 }]
+            });
+            const t = useTool('poly');
+            app.params.pmode = 'edit';
+            t.onDragStart({ x: 0, y: 0 });
+            t.onDragMove({ x: -20, y: -10 });
+            t.onDragEnd();
+            const p = app.model.entities[0];
+            near(p.pts[0].x, -20, 1e-9); near(p.pts[0].y, -10, 1e-9);
+            assert(app.undo.length === 1, '顶点编辑应进入撤销栈');
+          }
+        },
+        {
+          name: '重叠约束：完全重叠',
+          run: function () {
+            const d = docWith([
+              { type: 'rect', x1: 0, y1: 0, x2: 100, y2: 100 },
+              circle(300, 50, 10)
+            ]);
+            d.addConstraint({ type: 'overlap', ids: [d.entities[0].id, d.entities[1].id], mode: 'full', value: 100 });
+            global.CADConstraints.solve(d);
+            const c = d.entities[1];
+            near(c.c.x, 50, 1e-6); near(c.c.y, 50, 1e-6); near(c.r, 50, 1e-6);
+            const C = global.CADConstraints;
+            near(C.overlapRatio(Geo.entityBBox(d.entities[0]), Geo.entityBBox(c)), 1, 1e-9);
+          }
+        },
+        {
+          name: '重叠约束：比例维持与基准移动后自动跟随',
+          run: function () {
+            const d = docWith([
+              { type: 'rect', x1: 0, y1: 0, x2: 100, y2: 100 },
+              { type: 'rect', x1: 200, y1: 0, x2: 300, y2: 100 }
+            ]);
+            d.addConstraint({
+              type: 'overlap', ids: [d.entities[0].id, d.entities[1].id], mode: 'ratio', value: 50
+            });
+            const C = global.CADConstraints;
+            C.solve(d);
+            let b = Geo.entityBBox(d.entities[1]);
+            near(C.overlapRatio(Geo.entityBBox(d.entities[0]), b), 0.5, 1e-3, '初始重叠比例');
+
+            d.entities[0].x1 = 500; d.entities[0].x2 = 600;
+            d.entities[0].y1 = 0; d.entities[0].y2 = 100;
+            C.solve(d);
+            b = Geo.entityBBox(d.entities[1]);
+            near(C.overlapRatio(Geo.entityBBox(d.entities[0]), b), 0.5, 1e-3, '基准移动后重叠比例');
+          }
+        },
+        {
+          name: '重叠约束：重叠过多时回退到指定比例',
+          run: function () {
+            const d = docWith([
+              { type: 'rect', x1: 0, y1: 0, x2: 100, y2: 100 },
+              { type: 'rect', x1: 20, y1: 0, x2: 120, y2: 100 }
+            ]);
+            d.addConstraint({
+              type: 'overlap', ids: [d.entities[0].id, d.entities[1].id], mode: 'ratio', value: 40
+            });
+            const C = global.CADConstraints;
+            C.solve(d);
+            const ratio = C.overlapRatio(Geo.entityBBox(d.entities[0]), Geo.entityBBox(d.entities[1]));
+            near(ratio, 0.4, 1e-3, '重叠过多时应向外移动');
+          }
+        },
+        {
+          name: '重叠约束工具：参数传递与自动求解',
+          run: function () {
+            const app = mockApp();
+            app.model.add({ type: 'rect', x1: 0, y1: 0, x2: 100, y2: 100 });
+            app.model.add(circle(300, 50, 10));
+            app.params.omode = 'ratio';
+            app.params.oratio = 40;
+            const t = useTool('conov');
+            t.onTap({ x: 0, y: 50 });
+            t.onTap({ x: 310, y: 50 });
+            assert(app.model.constraints.length === 1, '应添加重叠约束');
+            const c = app.model.constraints[0];
+            assert(c.type === 'overlap' && c.mode === 'ratio', '约束方式应为比例');
+            near(c.value, 40, 1e-9);
+            global.CADConstraints.solve(app.model);
+            const A = Geo.entityBBox(app.model.entities[0]);
+            const B = Geo.entityBBox(app.model.entities[1]);
+            near(global.CADConstraints.overlapRatio(A, B), 0.4, 1e-3, '重叠比例应生效');
+          }
+        }
+      ]
+    },
+    {
+      name: '端点重合与线首尾链接',
+      cases: [
+        {
+          name: '端点自动检测：阈值内建立、阈值外跳过、重复不叠加',
+          run: function () {
+            const C = global.CADConstraints;
+            const d = docWith([line(0, 0, 100, 0), line(101.5, 0.8, 200, 0)]);
+            const added = C.autoDetectEndpoints(d, 3);
+            assert(added.length === 1, '阈值内应新建 1 个约束，实际 ' + added.length);
+            const c = added[0];
+            assert(c.type === 'coincident' && d.constraints[0] === c, '约束应写入模型');
+            assert(c.aIdx === 1 && c.bIdx === 0, '应连接第一条终点与第二条起点');
+            assert(C.nameOf('coincident') === '端点重合', '约束名称应为端点重合');
+            assert(C.iconOf('coincident') === '⊙', '约束标记应为 ⊙');
+
+            assert(C.autoDetectEndpoints(d, 3).length === 0, '重复检测不应叠加约束');
+            assert(d.constraints.length === 1, '重复检测后仍只有 1 条约束');
+
+            const far = docWith([line(0, 0, 100, 0), line(105, 0, 200, 0)]);
+            assert(C.autoDetectEndpoints(far, 3).length === 0, '超出阈值不应建立');
+            assert(C.autoDetectEndpoints(far, 0).length === 0, '阈值为 0 不建立');
+            assert(C.autoDetectEndpoints(far, -1).length === 0, '负阈值不建立');
+          }
+        },
+        {
+          name: '端点自动检测：圆弧 / 多边形 / 点与阈值边界',
+          run: function () {
+            const C = global.CADConstraints;
+            const d = docWith([arc(0, 0, 50, 0, Math.PI / 2), line(50.5, 0.5, 80, 0)]);
+            let added = C.autoDetectEndpoints(d, 1);
+            assert(added.length === 1, '圆弧端点应被检测');
+            assert(added[0].aIdx === 0 && added[0].bIdx === 0, '应取圆弧起点与直线起点');
+
+            const d2 = docWith([
+              { type: 'poly', closed: true, pts: [{ x: 0, y: 0 }, { x: 40, y: 0 }, { x: 0, y: 40 }] },
+              { type: 'point', p: { x: 0.2, y: 0.3 } }
+            ]);
+            added = C.autoDetectEndpoints(d2, 1);
+            assert(added.length === 1 && added[0].aIdx === 0 && added[0].bIdx === 0,
+              '多边形顶点与点应建立重合约束');
+
+            const d3 = docWith([line(0, 0, 100, 0), line(102, 0, 200, 0)]);
+            assert(C.autoDetectEndpoints(d3, 2).length === 1, '距离等于阈值应建立');
+
+            const d4 = docWith([circle(0, 0, 10), line(9, 0, 100, 0)]);
+            assert(C.autoDetectEndpoints(d4, 2).length === 0, '圆没有端点，不参与检测');
+          }
+        },
+        {
+          name: '端点重合约束：拖动基准或跟随图形后保持重合',
+          run: function () {
+            const C = global.CADConstraints;
+            const d = docWith([line(0, 0, 100, 0), line(100, 0, 100, 80)]);
+            d.addConstraint({
+              type: 'coincident',
+              ids: [d.entities[0].id, d.entities[1].id], aIdx: 1, bIdx: 0
+            });
+            Geo.translateEntity(d.entities[0], 10, 20);
+            C.solve(d);
+            near(d.entities[1].p1.x, 110, 1e-9, '跟随端点 x 应与基准重合');
+            near(d.entities[1].p1.y, 20, 1e-9, '跟随端点 y 应与基准重合');
+            near(d.entities[1].p2.y, 100, 1e-9, '跟随图形应整体平移保持形状');
+
+            Geo.translateEntity(d.entities[1], 30, -10);
+            C.solve(d);
+            near(d.entities[1].p1.x, 110, 1e-9, '拖动跟随图形后应回到基准端点');
+            near(d.entities[1].p1.y, 20, 1e-9);
+          }
+        },
+        {
+          name: '拖动过程中实时保持端点重合',
+          run: function () {
+            const app = mockApp();
+            const a = line(0, 0, 100, 0);
+            const b = line(100, 0, 100, 80);
+            app.model.add(a);
+            app.model.add(b);
+            app.model.addConstraint({
+              type: 'coincident', ids: [a.id, b.id], aIdx: 1, bIdx: 0
+            });
+            app.model.selected.add(a.id);
+            const t = useTool('move');
+            t.onDragStart({ x: 50, y: 0 });
+            t.onDragMove({ x: 60, y: 10 });
+            // 尚未结束拖动，关联端点就应同步跟随
+            near(b.p1.x, 110, 1e-9, '拖动过程中跟随端点 x');
+            near(b.p1.y, 10, 1e-9, '拖动过程中跟随端点 y');
+            t.onDragEnd({ x: 60, y: 10 });
+          }
+        },
+        {
+          name: '端点重合约束：缺失图元 / 非法索引 / 圆无端点',
+          run: function () {
+            const C = global.CADConstraints;
+            const d = docWith([line(0, 0, 100, 0)]);
+            assert(!C.solveOne(d, { type: 'coincident', ids: [d.entities[0].id, 'none'], aIdx: 0, bIdx: 0 }),
+              '缺失图元应返回 false');
+            assert(!C.solveOne(d, {
+              type: 'coincident', ids: [d.entities[0].id, d.entities[0].id], aIdx: 0, bIdx: 1
+            }), '同一图元应返回 false');
+
+            const d2 = docWith([line(0, 0, 100, 0), line(50, 50, 80, 80), circle(0, 0, 5)]);
+            assert(!C.solveOne(d2, {
+              type: 'coincident', ids: [d2.entities[0].id, d2.entities[1].id], aIdx: 9, bIdx: 0
+            }), '非法端点索引应返回 false');
+            assert(!C.solveOne(d2, {
+              type: 'coincident', ids: [d2.entities[0].id, d2.entities[2].id], aIdx: 0, bIdx: 0
+            }), '圆无端点应返回 false');
+
+            const d3 = docWith([line(0, 0, 100, 0), line(100, 0, 100, 80)]);
+            assert(!C.solveOne(d3, {
+              type: 'coincident', ids: [d3.entities[0].id, d3.entities[1].id], aIdx: 1, bIdx: 0
+            }), '端点已重合时无需移动');
+          }
+        },
+        {
+          name: '约束设置工具：默认关闭、开关即时检测与提示',
+          run: function () {
+            const app = mockApp();
+            app.model.add(line(0, 0, 100, 0));
+            app.model.add(line(101, 0, 200, 0));
+            const t = useTool('cset');
+            const defs = t.params();
+            const aep = defs.filter(function (f) { return f.key === 'aep'; })[0];
+            const llink = defs.filter(function (f) { return f.key === 'llink'; })[0];
+            assert(aep && aep.def === false, '端点自动重合默认关闭');
+            assert(llink && llink.def === false, '线首尾自动链接默认关闭');
+            assert(app.model.constraints.length === 0, '未开启时不自动建立约束');
+
+            app.params.aep = true;
+            app.params.aet = 3;
+            t.onParamChange('aep', true);
+            assert(app.model.constraints.length === 1, '开启后应即时检测并建立约束');
+            const toast = app.toasts[app.toasts.length - 1] || '';
+            assert(toast.indexOf('端点自动重合已开启') >= 0, '开启应给出操作说明');
+            assert(toast.indexOf('1') >= 0, '提示应包含新增数量');
+
+            t.onParamChange('aep', false);
+            assert((app.toasts[app.toasts.length - 1] || '').indexOf('已关闭') >= 0, '关闭应给出提示');
+
+            app.params.aet = 0.5;
+            t.onParamChange('aep', true);
+            assert(app.model.constraints.length === 1, '阈值内已检测过的端点不应重复建立');
+          }
+        },
+        {
+          name: '连续画线：线首尾自动链接建立并跟随',
+          run: function () {
+            const app = mockApp();
+            const t = useTool('line');
+            app.params.lchain = true;
+            app.params.llink = true;
+            t.onTap({ x: 0, y: 0 });
+            t.onTap({ x: 100, y: 0 });
+            assert(app.model.entities.length === 1 && app.model.constraints.length === 0,
+              '第一条直线不建立链接约束');
+
+            t.onTap({ x: 100, y: 80 });
+            assert(app.model.entities.length === 2, '应连续生成第二条直线');
+            assert(app.model.constraints.length === 1, '第二条直线应建立 1 条重合约束');
+            const c = app.model.constraints[0];
+            assert(c.type === 'coincident' && c.aIdx === 1 && c.bIdx === 0,
+              '应连接上一条终点与当前起点');
+            assert(c.ids[0] === app.model.entities[0].id && c.ids[1] === app.model.entities[1].id,
+              '约束对象顺序应为上一条 → 当前条');
+
+            t.onTap({ x: 0, y: 80 });
+            assert(app.model.constraints.length === 2, '第三条直线应再建立 1 条约束');
+
+            Geo.translateEntity(app.model.entities[0], 10, 10);
+            global.CADConstraints.solve(app.model);
+            near(app.model.entities[1].p1.x, 110, 1e-9, '拖动前一段后一段起点应跟随');
+            near(app.model.entities[1].p1.y, 10, 1e-9);
+            near(app.model.entities[1].p2.y, 90, 1e-9, '后续线段保持首尾相连');
+          }
+        },
+        {
+          name: '连续画线：关闭链接或未开连续画线时不自动约束',
+          run: function () {
+            const app = mockApp();
+            const t = useTool('line');
+            app.params.lchain = true;
+            app.params.llink = false;
+            t.onTap({ x: 0, y: 0 });
+            t.onTap({ x: 100, y: 0 });
+            t.onTap({ x: 100, y: 80 });
+            assert(app.model.entities.length === 2 && app.model.constraints.length === 0,
+              '关闭链接时不应建立约束');
+
+            app.params.llink = true;
+            t.onTap({ x: 0, y: 80 });
+            assert(app.model.constraints.length === 1, '开启后下一段应建立约束');
+
+            const app2 = mockApp();
+            const t2 = useTool('line');
+            app2.params.llink = true;
+            t2.onTap({ x: 0, y: 0 });
+            t2.onTap({ x: 10, y: 0 });
+            t2.onTap({ x: 20, y: 0 });
+            assert(app2.model.constraints.length === 0, '未开启连续画线时不应建立链接约束');
           }
         }
       ]

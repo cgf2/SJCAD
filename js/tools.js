@@ -34,11 +34,13 @@
     }, def);
   }
 
-  function addEntities(list) {
-    if (!list || !list.length) return;
+  function addEntities(list, after) {
+    if (!list || !list.length) return [];
     App.begin();
     list.forEach(function (e) { App.model.add(e); });
+    if (typeof after === 'function') after(list);
     App.end();
+    return list;
   }
 
   function clampRadius(r) {
@@ -326,19 +328,40 @@
     id: 'line', name: '直线', cat: 'draw', icon: '╱', dragType: 'preview',
     prompt: function () {
       if (!this.points.length) {
-        const base = '点按起点，或直接输入起点/终点坐标后确定';
-        return App.params.ortho ? base + '（正交：仅水平/垂直）' : base;
+        let base = '点按起点，或直接输入起点/终点坐标后确定';
+        if (App.params.ortho) base += '（正交：仅水平/垂直）';
+        if (App.params.lchain) base += '（连续画线已开启' + (App.params.llink ? '，首尾自动链接' : '') + '）';
+        return base;
       }
       if (this.snapMode) return '捕捉：' + this.snapMode + '（F3 或按住 Shift 可临时关闭捕捉）';
       if (!this._snapEnabled()) return '捕捉已关闭（F3 或松开 Shift 恢复）';
+      if (this.startArcId && (App.params.lalign === 'normal' || App.params.lalign === 'tangent')) {
+        return '沿圆弧' + (App.params.lalign === 'normal' ? '法线' : '切线') +
+          '方向拖动确定终点，或输入终点坐标后确定';
+      }
       if (App.params.tangent) return '拖动确定切线终点，或输入终点坐标后确定';
       if (App.params.perp) return '沿垂直方向拖动确定终点，或输入终点坐标后确定';
-      const base = '点按终点，靠近圆弧自动吸附切点、靠近直线自动吸附垂足';
-      return App.params.ortho ? base + '（正交：仅水平/垂直）' : base;
+      let base = '点按终点，靠近圆弧自动吸附切点、靠近直线自动吸附垂足';
+      if (App.params.ortho) base += '（正交：仅水平/垂直）';
+      if (App.params.lchain) base += '（ESC / 右键退出连续画线）';
+      if (App.params.lchain && App.params.llink) base += '（首尾自动链接已开启）';
+      return base;
     },
     params: function () {
       return [
         { key: 'ortho', type: 'toggle', label: '正交', def: false, group: '模式' },
+        { key: 'lchain', type: 'toggle', label: '连续画线', def: false, group: '模式' },
+        {
+          key: 'llink', type: 'toggle', label: '线首尾自动链接', def: false, group: '模式',
+          when: function (p) { return p.lchain === true; }
+        },
+        {
+          key: 'lalign', type: 'choice', label: '方向吸附', def: 'off', group: '对象约束',
+          when: function (p) { return p.larc === true; },
+          options: [
+            { v: 'off', label: '关闭' }, { v: 'normal', label: '法线' }, { v: 'tangent', label: '切线' }
+          ]
+        },
         {
           key: 'tangent', type: 'toggle', label: '相切', def: false, group: '对象约束',
           when: function (p) { return p.lref === 'circle'; }
@@ -366,9 +389,12 @@
       this.refId = null;
       this.startRef = null;
       this.hoverRef = null;
+      this.startArcId = null;
       this.snapMode = null;
       this.snapPt = null;
+      this.chainLastId = null;
       App.params.lref = '';
+      App.params.larc = false;
       App.params.tangent = false;
       App.params.perp = false;
       if (App.updateParams) App.updateParams();
@@ -406,6 +432,10 @@
           if (App.toast) App.toast(self.snapOff ? '捕捉已关闭（F3 恢复）' : '捕捉已开启');
           if (App.updatePrompt) App.updatePrompt();
           if (App.refresh) App.refresh();
+        } else if (e.key === 'Escape') {
+          if (!App.params.lchain && !self.points.length) return;
+          e.preventDefault();
+          self.onRightClick();
         }
       };
       this._snapKeyUp = function (e) {
@@ -482,7 +512,7 @@
       if (this.points.length > 1) return;
       this._scanRef(p);
     },
-    /** 起点落在圆/圆弧或直线上时，自动提供相切/垂直约束 */
+    /** 起点落在圆/圆弧或直线上时，自动提供相切/垂直约束；圆弧上另提供法线/切线吸附 */
     _detectRef: function (p0) {
       let e = App.pick(p0);
       if (!e && this.hover) e = App.pick(this.hover);
@@ -490,7 +520,17 @@
         : e && e.type === 'line' ? 'line' : '';
       this.startRef = e && kind ? { id: e.id, kind: kind } : null;
       this.hoverRef = null;
+      this.startArcId = null;
+      if (e && (e.type === 'circle' || e.type === 'arc')) {
+        const tol = App.worldTol(12);
+        const onCurve = Math.abs(Geo.dist(p0, e.c) - e.r) <= tol &&
+          (e.type === 'circle' || Geo.angleOnArc(Geo.angleOf(e.c, p0), e));
+        if (onCurve) this.startArcId = e.id;
+      }
+      const arc = !!this.startArcId;
+      if (App.params.larc !== arc) App.params.larc = arc;
       this._applyRef();
+      if (App.updateParams) App.updateParams();
     },
     /** 绘制过程中光标经过图形时同步约束选项：圆弧→相切，直线→垂直 */
     _scanRef: function (p) {
@@ -517,6 +557,19 @@
       return Math.abs(p.x - p0.x) >= Math.abs(p.y - p0.y)
         ? { x: p.x, y: p0.y }
         : { x: p0.x, y: p.y };
+    },
+    /** 起点在圆弧上时的法线 / 切线方向吸附 */
+    _alignEnd: function (p0, p) {
+      const mode = App.params.lalign;
+      if (mode !== 'normal' && mode !== 'tangent') return null;
+      const e = this.startArcId ? App.model.findById(this.startArcId) : null;
+      if (!e || (e.type !== 'circle' && e.type !== 'arc')) return null;
+      const u = unitOf(Geo.sub(p0, e.c));
+      if (!u) return null;
+      const dir = mode === 'normal' ? u : { x: -u.y, y: u.x };
+      const t = (p.x - p0.x) * dir.x + (p.y - p0.y) * dir.y;
+      if (Math.abs(t) < 1e-9) return null;
+      return { p: { x: p0.x + dir.x * t, y: p0.y + dir.y * t }, mode: mode };
     },
     /** 相切/垂直约束下的终点；返回 null 表示不约束，返回 {error} 表示无解 */
     _constrain: function (p0, p) {
@@ -563,23 +616,48 @@
       const t = (p.x - p0.x) * nx + (p.y - p0.y) * ny;
       return { p: { x: p0.x + nx * t, y: p0.y + ny * t } };
     },
-    /** 计算终点：对象约束 → 自动切点/垂足捕捉 → 正交 */
+    /** 计算终点：对象约束 → 圆弧法线/切线吸附 → 自动切点/垂足捕捉 → 正交 */
     _endPoint: function (p0, p) {
       const c = this._constrain(p0, p);
       if (c && c.error) { this._setSnap(null, null); return c; }
       if (c && c.p) { this._setSnap(null, null); return { p: c.p }; }
+      const al = this._alignEnd(p0, p);
+      if (al) { this._setSnap(null, null); return { p: al.p, align: al.mode }; }
       const a = this._autoSnap(p0, p);
       if (a) return { p: a };
       return { p: this._snap(p0, p) };
     },
+    /** 以 p 作为新的起点（连续画线时复用） */
+    _startAt: function (p) {
+      this.points = [Geo.cloneP(p)];
+      App.params.x1 = round3(p.x);
+      App.params.y1 = round3(p.y);
+      this.snapMode = null;
+      this.snapPt = null;
+      this._detectRef(p);
+      if (App.updateParams) App.updateParams();
+      App.updatePrompt();
+    },
+    /** 新建直线；连续画线且开启“线首尾自动链接”时，与上一条直线端点建立重合约束 */
+    _addLine: function (line) {
+      const prevId = (App.params.lchain && App.params.llink) ? this.chainLastId : null;
+      const created = addEntities([line], prevId ? function (list) {
+        App.model.addConstraint({
+          type: 'coincident', ids: [prevId, list[0].id], aIdx: 1, bIdx: 0
+        });
+      } : null);
+      this.chainLastId = created.length ? created[0].id : null;
+      return created[0] || null;
+    },
+    onParamChange: function (key, val) {
+      if (key !== 'llink') return;
+      App.toast(val
+        ? '已开启线首尾自动链接：连续画线时相邻线段端点自动建立重合约束'
+        : '已关闭线首尾自动链接');
+    },
     onTap: function (p) {
       if (!this.points.length) {
-        this.points.push(Geo.cloneP(p));
-        App.params.x1 = round3(p.x);
-        App.params.y1 = round3(p.y);
-        this._detectRef(p);
-        App.updateParams && App.updateParams();
-        App.updatePrompt();
+        this._startAt(p);
         return;
       }
       const res = this._endPoint(this.points[0], p);
@@ -588,9 +666,14 @@
       if (Geo.dist(q, this.points[0]) < 1e-9) {
         App.toast('请拖动确定终点'); return;
       }
-      addEntities([{ type: 'line', p1: Geo.cloneP(this.points[0]), p2: { x: q.x, y: q.y } }]);
-      this.reset();
-      App.updatePrompt();
+      this._addLine({ type: 'line', p1: Geo.cloneP(this.points[0]), p2: { x: q.x, y: q.y } });
+      if (App.params.lchain) {
+        this._startAt({ x: q.x, y: q.y });
+        App.toast('连续画线：继续点按下一点，ESC / 右键退出');
+      } else {
+        this.reset();
+        App.updatePrompt();
+      }
       App.refresh();
     },
     applyParams: function () {
@@ -610,9 +693,26 @@
         App.params.y2 = round3(y2);
         if (App.updateParams) App.updateParams();
       }
-      addEntities([{ type: 'line', p1: { x: x1, y: y1 }, p2: { x: x2, y: y2 } }]);
+      this._addLine({ type: 'line', p1: { x: x1, y: y1 }, p2: { x: x2, y: y2 } });
+      if (App.params.lchain) {
+        this._startAt({ x: x2, y: y2 });
+        App.toast('已生成直线，连续画线从终点继续');
+      } else {
+        this.reset();
+        App.updatePrompt();
+      }
+    },
+    /** 右键 / ESC：取消当前直线并退出连续画线 */
+    onRightClick: function () {
+      if (!App.params.lchain && !this.points.length) return;
+      const chain = !!App.params.lchain;
+      App.params.lchain = false;
       this.reset();
+      if (App.updateParams) App.updateParams();
       App.updatePrompt();
+      App.refresh();
+      if (chain) App.toast('已退出连续画线模式');
+      else App.toast('已取消当前直线');
     },
     onRender: function (ctx, R) {
       if (this.points.length !== 1) return;
@@ -625,24 +725,59 @@
       const res = this._endPoint(p0, p1);
       if (res.error) { R.previewLine(p0, p1); return; }
       R.previewLine(p0, res.p);
+      if (res.align) {
+        R.previewLabel(res.align === 'normal' ? '法线' : '切线', res.p);
+        return;
+      }
       if (this.snapMode && this.snapPt) R.previewMarker(this.snapPt, '捕捉' + this.snapMode);
       if (App.params.tangent) R.previewLabel('相切', res.p);
       else if (App.params.perp) R.previewLabel('垂直', res.p);
     }
   });
 
-  /* ================= 绘图：圆 ================= */
+  /* ================= 绘图：圆（半径 / 直径输入切换） ================= */
   const circleTool = baseTool({
     id: 'circle', name: '圆', cat: 'draw', icon: '○', dragType: 'preview',
     prompt: function () {
-      return this.points.length ? '点按确定半径，或输入半径后确定' : '点按圆心，或输入圆心坐标/半径后确定';
+      const dia = App.params.rmode === 'd';
+      const unit = dia ? '直径' : '半径';
+      return this.points.length
+        ? '点按确定' + unit + '，或在面板输入' + unit + '后确定'
+        : '点按圆心，或输入圆心坐标 /' + unit + '后确定';
     },
     params: function () {
+      const dia = App.params.rmode === 'd';
       return [
+        {
+          key: 'rmode', type: 'choice', label: '尺寸方式', def: 'r', group: '尺寸',
+          options: [{ v: 'r', label: '半径' }, { v: 'd', label: '直径' }]
+        },
         { key: 'cx', label: 'X', def: 0, group: '圆心' },
         { key: 'cy', label: 'Y', def: 0, group: '圆心' },
-        { key: 'r', label: '半径', def: 50, group: '半径', positive: true }
+        { key: 'r', label: dia ? '直径' : '半径', def: 50, group: '尺寸', positive: true }
       ];
+    },
+    reset: function () {
+      this.points = [];
+      this.hover = null;
+      this._rmode = App.params.rmode || 'r';
+    },
+    /** 半径 / 直径切换：同步换算面板数值，绘制流程不中断 */
+    onParamChange: function (key, val) {
+      if (key !== 'rmode') return;
+      const next = String(val) === 'd' ? 'd' : 'r';
+      const prev = this._rmode || 'r';
+      if (next === prev) return;
+      const v = Number(App.params.r);
+      if (isFinite(v) && v > 0) App.params.r = round3(next === 'd' ? v * 2 : v / 2);
+      App.params.rmode = next;
+      this._rmode = next;
+      if (App.toast) App.toast('已切换为输入' + (next === 'd' ? '直径' : '半径'));
+    },
+    _radius: function () {
+      const v = Number(App.params.r);
+      const r = App.params.rmode === 'd' ? v / 2 : v;
+      return isFinite(r) && r > 0 ? r : 50;
     },
     onTap: function (p) {
       if (!this.points.length) {
@@ -654,6 +789,8 @@
         return;
       }
       const r = clampRadius(Geo.dist(this.points[0], p));
+      App.params.r = round3(App.params.rmode === 'd' ? r * 2 : r);
+      if (App.updateParams) App.updateParams();
       addEntities([{ type: 'circle', c: Geo.cloneP(this.points[0]), r: r }]);
       this.reset();
       App.updatePrompt();
@@ -661,9 +798,11 @@
     },
     applyParams: function () {
       const cx = Number(App.params.cx), cy = Number(App.params.cy);
-      const r = Number(App.params.r);
+      const v = Number(App.params.r);
+      const dia = App.params.rmode === 'd';
+      const r = dia ? v / 2 : v;
       if (!isFinite(cx) || !isFinite(cy)) { App.toast('请输入有效的圆心坐标'); return; }
-      if (!(r > 0)) { App.toast('半径需大于 0'); return; }
+      if (!(r > 0)) { App.toast((dia ? '直径' : '半径') + '需大于 0'); return; }
       addEntities([{ type: 'circle', c: { x: cx, y: cy }, r: r }]);
       this.reset();
       App.updatePrompt();
@@ -671,10 +810,11 @@
     onRender: function (ctx, R) {
       if (this.points.length !== 1) return;
       const c = this.points[0];
-      let r = this.hover ? Geo.dist(c, this.hover) : Number(App.params.r) || 50;
-      if (r < 0.01) r = 0.01;
+      const r = this.hover ? Math.max(Geo.dist(c, this.hover), 0.01) : this._radius();
+      const dia = App.params.rmode === 'd';
       R.previewCircle(c, r);
       R.previewLine(c, this.hover || Geo.polar(c, r, Math.PI / 4));
+      R.previewLabel((dia ? '⌀' : 'R') + fmt(dia ? r * 2 : r), Geo.polar(c, r, Math.PI / 4));
     }
   });
 
@@ -768,6 +908,321 @@
       R.previewLine(p1, p2);
       R.previewArc(res.arc);
       R.previewLabel('R' + fmt(res.arc.r), Geo.entityMidpoint(res.arc));
+    }
+  });
+
+  /* ================= 绘图：矩形 ================= */
+  const rectTool = baseTool({
+    id: 'rect', name: '矩形', cat: 'draw', icon: '▭', dragType: 'tool', hoverLive: true,
+    prompt: function () {
+      return this.points.length
+        ? '拖动或点按对角点完成矩形；也可输入宽高后确定'
+        : '拖动创建矩形，或点按第一个角点';
+    },
+    params: function () {
+      return [
+        { key: 'x1', label: 'X', def: 0, group: '起点' },
+        { key: 'y1', label: 'Y', def: 0, group: '起点' },
+        { key: 'w', label: '宽', def: 120, group: '尺寸', positive: true },
+        { key: 'h', label: '高', def: 80, group: '尺寸', positive: true },
+        {
+          key: 'rstyle', type: 'choice', label: '边框', def: 'solid', group: '样式',
+          options: [{ v: 'solid', label: '实线' }, { v: 'dashed', label: '虚线' }]
+        },
+        {
+          key: 'rfill', type: 'choice', label: '填充', def: 'none', group: '样式',
+          options: [
+            { v: 'none', label: '无' }, { v: 'blue', label: '蓝' }, { v: 'green', label: '绿' },
+            { v: 'orange', label: '橙' }, { v: 'purple', label: '紫' }
+          ]
+        }
+      ];
+    },
+    _mk: function (a, b) {
+      const r = Geo.normalizeRect(a.x, a.y, b.x, b.y);
+      if (r.x2 - r.x1 < 1e-6 || r.y2 - r.y1 < 1e-6) return null;
+      return {
+        type: 'rect', x1: r.x1, y1: r.y1, x2: r.x2, y2: r.y2,
+        style: App.params.rstyle || 'solid', fill: App.params.rfill || 'none'
+      };
+    },
+    _commit: function (a, b) {
+      const ent = this._mk(a, b);
+      if (!ent) { App.toast('宽高需大于 0'); return false; }
+      addEntities([ent]);
+      this.reset();
+      App.updateParams && App.updateParams();
+      App.updatePrompt();
+      App.refresh();
+      return true;
+    },
+    onTap: function (p) {
+      if (this.points.length === 1) { this._commit(this.points[0], p); return; }
+      this.points = [Geo.cloneP(p)];
+      App.params.x1 = round3(p.x);
+      App.params.y1 = round3(p.y);
+      App.updateParams && App.updateParams();
+      App.updatePrompt();
+    },
+    onDragStart: function (p) {
+      if (!this.points.length) this.points = [Geo.cloneP(p)];
+      this.hover = Geo.cloneP(p);
+    },
+    onDragMove: function (p) {
+      this.hover = Geo.cloneP(p);
+      App.refresh();
+    },
+    onDragEnd: function (p) {
+      if (!this.points.length) return;
+      this._commit(this.points[0], p);
+    },
+    onDragCancel: function () {
+      this.reset();
+      App.updatePrompt();
+      App.refresh();
+    },
+    onRender: function (ctx, R) {
+      if (!this.points.length || !this.hover) return;
+      const ent = this._mk(this.points[0], this.hover);
+      if (!ent) return;
+      R.previewEntity(ent);
+      R.previewLabel(
+        fmt(ent.x2 - ent.x1) + ' × ' + fmt(ent.y2 - ent.y1),
+        { x: (ent.x1 + ent.x2) / 2, y: (ent.y1 + ent.y2) / 2 }
+      );
+    },
+    applyParams: function () {
+      const x = Number(App.params.x1), y = Number(App.params.y1);
+      const w = Number(App.params.w), h = Number(App.params.h);
+      if (![x, y, w, h].every(isFinite)) { App.toast('请输入有效数值'); return; }
+      if (!(w > 1e-6) || !(h > 1e-6)) { App.toast('宽高需大于 0'); return; }
+      this._commit({ x: x, y: y }, { x: x + w, y: y + h });
+    }
+  });
+
+  /* ================= 绘图：多边形 ================= */
+  const polyTool = baseTool({
+    id: 'poly', name: '多边形', cat: 'draw', icon: '⬠', dragType: 'tool', hoverLive: true,
+    prompt: function () {
+      if (App.params.pmode === 'edit') {
+        return this.dragIdx >= 0 ? '拖动顶点调整，松手完成' : '点按多边形顶点后拖动调整';
+      }
+      const n = Number(App.params.psides) || 0;
+      if (n >= 3) {
+        return this.hover ? '点按中心生成 ' + n + ' 边形（半径按参数）' : '点按中心生成正多边形';
+      }
+      if (!this.points.length) return '依次点按顶点，回到起点或点“确定”闭合';
+      return '继续点按添加顶点（已有 ' + this.points.length + ' 个），点回起点闭合';
+    },
+    params: function () {
+      return [
+        {
+          key: 'pmode', type: 'choice', label: '模式', def: 'draw', group: '模式',
+          options: [{ v: 'draw', label: '绘制' }, { v: 'edit', label: '编辑顶点' }]
+        },
+        {
+          key: 'psides', type: 'choice', label: '边数预设', def: '0', group: '边数',
+          options: [
+            { v: '0', label: '自由' }, { v: '3', label: '3' }, { v: '5', label: '5' },
+            { v: '6', label: '6' }, { v: '8', label: '8' }
+          ]
+        },
+        {
+          key: 'prad', label: '半径', def: 80, group: '边数', positive: true,
+          when: function (p) { return String(p.psides) !== '0'; }
+        },
+        {
+          key: 'pfill', type: 'choice', label: '填充', def: 'none', group: '样式',
+          options: [
+            { v: 'none', label: '无' }, { v: 'blue', label: '蓝' }, { v: 'green', label: '绿' },
+            { v: 'orange', label: '橙' }, { v: 'purple', label: '紫' }
+          ]
+        }
+      ];
+    },
+    reset: function () {
+      this.points = [];
+      this.hover = null;
+      this.editId = null;
+      this.dragIdx = -1;
+      this.dragClone = null;
+    },
+    _mkPoly: function (pts) {
+      if (!pts || pts.length < 3) return null;
+      if (Math.abs(Geo.polyArea(pts)) < 1e-6) return null;
+      return {
+        type: 'poly', pts: pts.map(Geo.cloneP), closed: true,
+        fill: App.params.pfill || 'none'
+      };
+    },
+    _finish: function () {
+      const ent = this._mkPoly(this.points);
+      if (!ent) { App.toast('至少需要 3 个不共线顶点'); return false; }
+      addEntities([ent]);
+      this.reset();
+      App.updateParams && App.updateParams();
+      App.updatePrompt();
+      App.refresh();
+      return true;
+    },
+    _regular: function (center, r, n, a0) {
+      if (!(r > 0)) return null;
+      if (a0 == null) a0 = Math.PI / 2;
+      const pts = [];
+      for (let i = 0; i < n; i++) pts.push(Geo.polar(center, r, a0 + i * Math.PI * 2 / n));
+      return pts;
+    },
+    _select: function (id) {
+      App.model.selected.clear();
+      App.model.selected.add(id);
+      if (App.afterSelectionChange) App.afterSelectionChange();
+    },
+    _vertexAt: function (p) {
+      const tol = App.worldTol ? App.worldTol(16) : 0;
+      let best = null, bestD = tol;
+      App.model.entities.forEach(function (e) {
+        if (e.type !== 'poly' || !e.pts) return;
+        e.pts.forEach(function (q, i) {
+          const d = Geo.dist(p, q);
+          if (d < bestD) { bestD = d; best = { id: e.id, idx: i, ent: e }; }
+        });
+      });
+      return best;
+    },
+    _editTap: function (p) {
+      const hit = this._vertexAt(p);
+      if (hit) {
+        this.editId = hit.id;
+        this.dragIdx = hit.idx;
+        this._select(hit.id);
+        App.toast('拖动顶点调整位置');
+        App.refresh();
+        return;
+      }
+      const e = App.pick(p);
+      if (e && e.type === 'poly') {
+        this.editId = e.id;
+        this.dragIdx = -1;
+        this._select(e.id);
+        App.toast('点按顶点后拖动调整');
+      } else {
+        this.editId = null;
+        this.dragIdx = -1;
+      }
+      App.refresh();
+    },
+    onTap: function (p) {
+      if (App.params.pmode === 'edit') { this._editTap(p); return; }
+      const n = Number(App.params.psides) || 0;
+      if (n >= 3) {
+        const r = Number(App.params.prad);
+        if (!(r > 0)) { App.toast('半径需大于 0'); return; }
+        const pts = this._regular(p, r, n, 0);
+        const ent = this._mkPoly(pts);
+        if (!ent) { App.toast('无法生成多边形'); return; }
+        addEntities([ent]);
+        this.reset();
+        App.updateParams && App.updateParams();
+        App.updatePrompt();
+        return;
+      }
+      if (this.points.length >= 3 &&
+          Geo.dist(p, this.points[0]) <= (App.worldTol ? App.worldTol(14) : 0)) {
+        this._finish();
+        return;
+      }
+      if (this.points.length && Geo.dist(p, this.points[this.points.length - 1]) < 1e-6) return;
+      this.points.push(Geo.cloneP(p));
+      App.updatePrompt();
+      App.refresh();
+    },
+    applyParams: function () {
+      if (App.params.pmode === 'edit') { App.toast('编辑模式下直接拖动顶点'); return; }
+      this._finish();
+    },
+    onDragStart: function (p) {
+      if (App.params.pmode !== 'edit') return;
+      const hit = this._vertexAt(p);
+      if (!hit) { this.dragIdx = -1; return; }
+      this.editId = hit.id;
+      this.dragIdx = hit.idx;
+      this.dragClone = Geo.copyShape({}, hit.ent);
+      this._select(hit.id);
+      App.begin();
+    },
+    onDragMove: function (p) {
+      if (this.dragIdx < 0) return;
+      const e = App.model.findById(this.editId);
+      if (!e || !e.pts) return;
+      e.pts[this.dragIdx] = { x: p.x, y: p.y };
+      App.solveConstraints();
+      App.refresh();
+    },
+    onDragEnd: function () {
+      if (this.dragIdx < 0) return;
+      const e = App.model.findById(this.editId);
+      if (e && this.dragClone && Math.abs(Geo.polyArea(e.pts)) < 1e-6) {
+        Geo.copyShape(e, this.dragClone);
+        App.toast('顶点调整后多边形退化，已还原');
+      } else {
+        App.toast('顶点已调整');
+      }
+      this.dragIdx = -1;
+      this.dragClone = null;
+      App.end();
+    },
+    onDragCancel: function () {
+      if (this.dragIdx < 0) return;
+      const e = App.model.findById(this.editId);
+      if (e && this.dragClone) Geo.copyShape(e, this.dragClone);
+      this.dragIdx = -1;
+      this.dragClone = null;
+      if (App.abort) App.abort();
+    },
+    onRender: function (ctx, R) {
+      if (App.params.pmode === 'edit') {
+        const e = this.editId != null ? App.model.findById(this.editId) : null;
+        if (!e || e.type !== 'poly' || !e.pts) return;
+        e.pts.forEach(function (q, i) {
+          const s = R.screen(q);
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, i === this.dragIdx ? 6 : 4.5, 0, Geo.TAU);
+          ctx.fillStyle = i === this.dragIdx ? '#ffb020' : '#37c8ff';
+          ctx.strokeStyle = '#0d1117';
+          ctx.lineWidth = 1.5;
+          ctx.fill();
+          ctx.stroke();
+          ctx.restore();
+        }, this);
+        return;
+      }
+      const n = Number(App.params.psides) || 0;
+      if (n >= 3) {
+        if (!this.hover) return;
+        const r = Number(App.params.prad);
+        const pts = this._regular(this.hover, r, n, 0);
+        if (!pts) return;
+        R.previewEntity({ type: 'poly', pts: pts, closed: true, fill: App.params.pfill });
+        R.previewMarker(this.hover, n + ' 边形');
+        return;
+      }
+      if (!this.points.length) return;
+      for (let i = 0; i < this.points.length; i++) {
+        const s = R.screen(this.points[i]);
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, 4, 0, Geo.TAU);
+        ctx.fillStyle = i === 0 ? '#ffb020' : '#37c8ff';
+        ctx.fill();
+        ctx.restore();
+        if (i > 0) R.previewLine(this.points[i - 1], this.points[i]);
+      }
+      if (this.hover && this.points.length) {
+        R.previewLine(this.points[this.points.length - 1], this.hover);
+        if (this.points.length >= 3) R.previewLine(this.hover, this.points[0]);
+      }
+      if (this.points.length >= 3) R.previewLabel('点回起点闭合', this.points[0]);
     }
   });
 
@@ -1264,6 +1719,7 @@
       } else if (e.type === 'point') {
         e.p.x = p.x; e.p.y = p.y;
       }
+      App.solveConstraints();
       App.refresh();
     },
     onDragEnd: function () {
@@ -1362,6 +1818,8 @@
         Geo.copyShape(e, c);
         Geo.translateEntity(e, dx, dy);
       });
+      // 拖动过程中实时求解，关联端点同步跟随
+      App.solveConstraints();
       App.refresh();
     },
     onDragEnd: function () {
@@ -1955,6 +2413,772 @@
     }
   });
 
+  /* ================= 查询：智能标注（尺寸驱动） ================= */
+  const dimTool = baseTool({
+    id: 'dim', name: '智能标注', cat: 'query', icon: '⇥', dragType: 'pan', hoverLive: true,
+    prompt: function () {
+      if (App.params.dmode === 'parallel') {
+        if (!this.picks || !this.picks.length) {
+          return '平行距离标注：依次点按两条平行直线，或拖动框选两条平行线段';
+        }
+        return '平行距离标注：点按第二条平行直线（已选 1 条）';
+      }
+      if (App.params.dmode === 'angle') {
+        if (!this.picks || !this.picks.length) return '角度标注：点按第一条相交直线 / 圆弧';
+        return '角度标注：点按第二条直线 / 圆弧';
+      }
+      return '点按直线 / 圆 / 圆弧自动生成尺寸标注；在右侧面板修改数值即可驱动图形';
+    },
+    params: function () {
+      return [
+        {
+          key: 'dmode', type: 'choice', label: '标注模式', def: 'auto', group: '标注', options: [
+            { v: 'auto', label: '自动' }, { v: 'angle', label: '角度' }, { v: 'parallel', label: '平行距离' }
+          ]
+        },
+        { key: 'dortho', type: 'toggle', label: '正交标注', def: false, group: '标注' },
+        { key: 'dshow', type: 'toggle', label: '显示标注', def: true, group: '标注' }
+      ];
+    },
+    reset: function () {
+      this.picks = [];
+      this.hoverEnt = null;
+      this.band = null;
+    },
+    /** 平行距离模式需要框选，因此拖动不再平移视图 */
+    _syncDragType: function () {
+      this.dragType = App.params.dmode === 'parallel' ? 'tool' : 'pan';
+      return this.dragType;
+    },
+    activate: function () { this.reset(); this._syncDragType(); },
+    deactivate: function () { this.reset(); },
+    onParamChange: function (key) {
+      if (key === 'dmode') {
+        this.reset();
+        this._syncDragType();
+      }
+    },
+    onHover: function (p) {
+      this.hover = p;
+      this.hoverEnt = App.pick(p);
+    },
+    onTap: function (p) {
+      if (App.params.dmode === 'parallel') { this._pickParallel(p); return; }
+      if (App.params.dmode === 'angle') { this._pickAngle(p); return; }
+      const D = global.CADDims;
+      if (!D) return;
+      const e = App.pick(p);
+      if (!e) { App.toast('请点按直线、圆或圆弧'); return; }
+      const kind = D.kindOf(e);
+      if (!kind) { App.toast('点暂不支持智能标注'); return; }
+      const exist = D.findFor(App.model, e.id, kind);
+      if (exist) {
+        App.showDim(exist.id);
+        App.toast('已定位该图形的' + D.nameOf(kind));
+        return;
+      }
+      App.begin();
+      const dim = App.model.addDim({ kind: kind, entId: e.id, offset: App.worldTol(30) });
+      App.end();
+      App.showDim(dim.id);
+      App.toast('已生成' + D.nameOf(kind));
+    },
+    /** 角度标注：依次点选两条直线 / 圆弧 */
+    _pickAngle: function (p) {
+      const D = global.CADDims;
+      if (!D) return;
+      const e = App.pick(p);
+      if (!e) { App.toast('请点按直线、圆或圆弧'); return; }
+      if (!(e.type === 'line' || conCircleLike(e))) {
+        App.toast('角度标注仅支持直线与圆弧'); return;
+      }
+      if (!this.picks.length) {
+        this.picks = [e.id];
+        App.toast('已选择第一个图形，请点按第二个相交图形');
+        App.updatePrompt();
+        App.refresh();
+        return;
+      }
+      if (this.picks[0] === e.id) { App.toast('请点按另一个图形'); return; }
+      const exist = D.findAngleFor(App.model, this.picks[0], e.id);
+      if (exist) {
+        this.reset();
+        App.showDim(exist.id);
+        App.toast('已定位该角度标注');
+        App.updatePrompt();
+        App.refresh();
+        return;
+      }
+      const draft = { kind: 'angle', ids: [this.picks[0], e.id] };
+      const g = D.angleGeomFor(App.model, draft);
+      if (!g) { App.toast('两个图形没有有效交点，无法测量角度'); return; }
+      App.begin();
+      draft.offset = App.worldTol(46);
+      const dim = App.model.addDim(draft);
+      App.end();
+      this.reset();
+      App.showDim(dim.id);
+      App.toast('已生成角度标注 ' + fmt(g.deg) + '°');
+      App.updatePrompt();
+      App.refresh();
+    },
+    /** 平行距离标注：依次点按两条平行直线 */
+    _pickParallel: function (p) {
+      const D = global.CADDims;
+      if (!D) return;
+      const e = App.pick(p);
+      if (!e) { App.toast('请点按直线'); return; }
+      if (e.type !== 'line') { App.toast('平行距离标注仅支持直线'); return; }
+      if (!this.picks.length) {
+        this.picks = [e.id];
+        App.toast('已选择第一条直线，请点按与其平行的第二条直线');
+        App.updatePrompt();
+        App.refresh();
+        return;
+      }
+      if (this.picks[0] === e.id) { App.toast('请点按另一条直线'); return; }
+      const a = App.model.findById(this.picks[0]);
+      const check = D.parallelCheck(a, e);
+      if (!check.ok) { App.toast(check.error); return; }
+      this._createParallel(this.picks[0], e.id);
+    },
+    /** 校验通过后创建 / 定位平行距离标注 */
+    _createParallel: function (idA, idB) {
+      const D = global.CADDims;
+      if (!D) return;
+      const exist = D.findParallelFor(App.model, idA, idB);
+      if (exist) {
+        this.reset();
+        App.showDim(exist.id);
+        App.toast('已定位该平行距离标注');
+        App.updatePrompt();
+        App.refresh();
+        return;
+      }
+      const draft = { kind: 'pdist', ids: [idA, idB] };
+      const g = D.parallelGeomFor(App.model, draft);
+      if (!g) { App.toast('两条线段不平行，无法标注平行距离'); return; }
+      App.begin();
+      draft.param = g.mid;
+      const dim = App.model.addDim(draft);
+      App.end();
+      this.reset();
+      App.showDim(dim.id);
+      App.toast('已生成平行距离标注 ' + fmt(g.d));
+      App.updatePrompt();
+      App.refresh();
+    },
+    /* 框选两条平行直线 */
+    onDragStart: function (p) {
+      if (App.params.dmode !== 'parallel') return;
+      this.band = { x1: p.x, y1: p.y, x2: p.x, y2: p.y };
+    },
+    onDragMove: function (p) {
+      if (!this.band) return;
+      this.band.x2 = p.x; this.band.y2 = p.y;
+      App.refresh();
+    },
+    onDragEnd: function (p) {
+      if (!this.band) return;
+      this.band.x2 = p.x; this.band.y2 = p.y;
+      const r = Geo.normalizeRect(this.band.x1, this.band.y1, this.band.x2, this.band.y2);
+      this.band = null;
+      const list = App.model.entitiesInRect(r, true).filter(function (e) { return e.type === 'line'; });
+      if (list.length !== 2) {
+        App.toast('请框选两条平行直线（当前 ' + list.length + ' 条）');
+        App.refresh();
+        return;
+      }
+      const D = global.CADDims;
+      const check = D.parallelCheck(list[0], list[1]);
+      if (!check.ok) { App.toast(check.error); App.refresh(); return; }
+      this._createParallel(list[0].id, list[1].id);
+    },
+    onDragCancel: function () { this.band = null; },
+    onRender: function (ctx, R) {
+      if (App.params.dmode === 'parallel') {
+        if (this.band) R.previewRect(Geo.normalizeRect(this.band.x1, this.band.y1, this.band.x2, this.band.y2));
+        (this.picks || []).forEach(function (id) {
+          const ent = App.model.findById(id);
+          if (ent) R.ghostEntity(ent);
+        });
+        if (this.hoverEnt && this.picks.indexOf(this.hoverEnt.id) < 0) R.ghostEntity(this.hoverEnt);
+        return;
+      }
+      if (App.params.dmode !== 'angle') return;
+      this.picks.forEach(function (id) {
+        const ent = App.model.findById(id);
+        if (ent) R.ghostEntity(ent);
+      });
+      if (this.hoverEnt && this.picks.indexOf(this.hoverEnt.id) < 0) R.ghostEntity(this.hoverEnt);
+    }
+  });
+
+  /* ================= 几何约束工具 ================= */
+  function conRep(e) {
+    if (!e) return null;
+    if (e.type === 'line') return Geo.lerp(e.p1, e.p2, 0.5);
+    if (e.type === 'circle' || e.type === 'arc') return { x: e.c.x, y: e.c.y };
+    if (e.type === 'point') return { x: e.p.x, y: e.p.y };
+    if (e.type === 'rect' || e.type === 'poly') {
+      const b = Geo.entityBBox(e);
+      return { x: (b.x1 + b.x2) / 2, y: (b.y1 + b.y2) / 2 };
+    }
+    return null;
+  }
+
+  function conCircleLike(e) { return e && (e.type === 'circle' || e.type === 'arc'); }
+
+  function commitConstraint(type, ids, extra) {
+    const C = global.CADConstraints;
+    if (!C) return null;
+    App.begin();
+    const con = App.model.addConstraint(Object.assign({ type: type, ids: ids.slice() }, extra || {}));
+    C.solve(App.model);
+    App.end();
+    App.updatePrompt();
+    return con;
+  }
+
+  function makeConstraintTool(cfg) {
+    const tool = baseTool({
+      id: cfg.id, name: cfg.name, cat: 'constraint', icon: cfg.icon, dragType: 'pan',
+      hoverLive: true,
+      prompt: function () { return cfg.prompt.call(this); },
+      params: function () {
+        const list = [{ key: 'cshow', type: 'toggle', label: '显示标记', def: true, group: '约束' }];
+        if (cfg.type === 'distance') {
+          list.push({ key: 'dv', label: '距离', def: 50, group: '约束', positive: true });
+        }
+        if (cfg.type === 'angle') {
+          list.push({ key: 'av', label: '角度°', def: 60, group: '约束' });
+        }
+        if (cfg.type === 'overlap') {
+          list.push({
+            key: 'omode', type: 'choice', label: '重叠方式', def: 'full', group: '重叠',
+            options: [{ v: 'full', label: '完全' }, { v: 'ratio', label: '比例' }]
+          });
+          list.push({
+            key: 'oratio', label: '重叠比例%', def: 60, group: '重叠', positive: true,
+            when: function (p) { return p.omode === 'ratio'; }
+          });
+        }
+        return list;
+      },
+      reset: function () {
+        this.picks = [];
+        this.hoverEnt = null;
+        this._conId = null;
+        this._dvTouched = false;
+        this._avTouched = false;
+      },
+      activate: function () { this.reset(); },
+      deactivate: function () { this.reset(); },
+      onParamChange: function (key) {
+        if (key === 'dv') this._dvTouched = true;
+        if (key === 'av') this._avTouched = true;
+      },
+      onHover: function (p) {
+        this.hover = p;
+        this.hoverEnt = App.pick(p);
+      },
+      onTap: function (p) {
+        const e = App.pick(p);
+        if (!e) { App.toast('请点按图形'); return; }
+        cfg.pick.call(this, e);
+      },
+      onRender: function (ctx, R) {
+        const C = global.CADConstraints;
+        this.picks.forEach(function (id) {
+          const ent = App.model.findById(id);
+          if (ent) R.ghostEntity(ent);
+        });
+        if (this.hoverEnt && this.picks.indexOf(this.hoverEnt.id) < 0) R.ghostEntity(this.hoverEnt);
+        if (!C) return;
+        const draft = cfg.draft ? cfg.draft.call(this) : null;
+        if (draft) {
+          C.preview(App.model, draft).forEach(function (g) { R.ghostEntity(g); });
+        }
+      },
+      applyParams: cfg.finish ? function () { cfg.finish.call(this); } : undefined
+    });
+    Object.keys(cfg).forEach(function (k) {
+      if (k.charAt(0) === '_' && typeof cfg[k] === 'function') tool[k] = cfg[k];
+    });
+    return tool;
+  }
+
+  const hConstraintTool = makeConstraintTool({
+    id: 'ch', name: '水平', icon: 'H', type: 'horizontal',
+    prompt: function () { return '点按一条直线，强制水平（保持起点与长度）'; },
+    pick: function (e) {
+      if (e.type !== 'line') { App.toast('水平约束仅支持直线'); return; }
+      commitConstraint('horizontal', [e.id]);
+      App.toast('已添加水平约束');
+      this.reset();
+      App.updatePrompt();
+      App.refresh();
+    },
+    draft: function () {
+      if (this.hoverEnt && this.hoverEnt.type === 'line' && !this.picks.length) {
+        return { type: 'horizontal', ids: [this.hoverEnt.id] };
+      }
+      return null;
+    }
+  });
+
+  const vConstraintTool = makeConstraintTool({
+    id: 'cv', name: '垂直', icon: 'V', type: 'vertical',
+    prompt: function () { return '点按一条直线，强制垂直（保持起点与长度）'; },
+    pick: function (e) {
+      if (e.type !== 'line') { App.toast('垂直约束仅支持直线'); return; }
+      commitConstraint('vertical', [e.id]);
+      App.toast('已添加垂直约束');
+      this.reset();
+      App.updatePrompt();
+      App.refresh();
+    },
+    draft: function () {
+      if (this.hoverEnt && this.hoverEnt.type === 'line' && !this.picks.length) {
+        return { type: 'vertical', ids: [this.hoverEnt.id] };
+      }
+      return null;
+    }
+  });
+
+  const symmetricTool = makeConstraintTool({
+    id: 'csym', name: '对称', icon: '⇋', type: 'symmetric',
+    prompt: function () {
+      if (!this.picks.length) return '点按第一个图形';
+      if (this.picks.length === 1) return '点按第二个同类图形';
+      return '点按一条直线作为对称轴';
+    },
+    pick: function (e) {
+      if (this.picks.length < 2) {
+        if (this.picks.indexOf(e.id) >= 0) { App.toast('该图形已选'); return; }
+        this.picks.push(e.id);
+        App.updatePrompt();
+        App.refresh();
+        return;
+      }
+      if (e.type !== 'line') { App.toast('请点按一条直线作为对称轴'); return; }
+      if (this.picks.indexOf(e.id) >= 0) { App.toast('对称轴不能是待对称图形'); return; }
+      const a = App.model.findById(this.picks[0]);
+      const b = App.model.findById(this.picks[1]);
+      if (!a || !b || a.type !== b.type) { App.toast('两个图形类型需一致'); return; }
+      commitConstraint('symmetric', [a.id, b.id], { axisId: e.id });
+      App.toast('已添加对称约束');
+      this.reset();
+      App.updatePrompt();
+      App.refresh();
+    },
+    draft: function () {
+      if (this.picks.length === 2 && this.hoverEnt && this.hoverEnt.type === 'line' &&
+        this.picks.indexOf(this.hoverEnt.id) < 0) {
+        return { type: 'symmetric', ids: this.picks.slice(), axisId: this.hoverEnt.id };
+      }
+      return null;
+    }
+  });
+
+  const collinearTool = makeConstraintTool({
+    id: 'ccol', name: '共线', icon: '≡', type: 'collinear',
+    prompt: function () {
+      if (!this.picks.length) return '点按一条直线作为共线基准';
+      return '继续点按直线 / 点 / 圆加入共线（圆自动取圆心，已选 ' + this.picks.length + ' 个），点“确定”完成';
+    },
+    pick: function (e) {
+      if (!this.picks.length) {
+        if (e.type !== 'line') { App.toast('请先点按一条直线作为基准'); return; }
+        this.picks.push(e.id);
+        App.updatePrompt();
+        App.refresh();
+        return;
+      }
+      if (this.picks.indexOf(e.id) >= 0) { App.toast('该图形已在共线集合中'); return; }
+      if (e.type !== 'line' && e.type !== 'point' && !conCircleLike(e)) {
+        App.toast('共线仅支持直线、点、圆 / 圆弧'); return;
+      }
+      this.picks.push(e.id);
+      if (!this._conId) {
+        const con = commitConstraint('collinear', this.picks.slice());
+        this._conId = con ? con.id : null;
+      } else {
+        const con = App.model.findConstraint(this._conId);
+        if (con) {
+          App.begin();
+          con.ids = this.picks.slice();
+          if (global.CADConstraints) global.CADConstraints.solve(App.model);
+          App.end();
+        }
+      }
+      App.toast('已在 ' + this.picks.length + ' 个图形间建立共线约束');
+      App.updatePrompt();
+      App.refresh();
+    },
+    draft: function () {
+      if (this.picks.length === 1 && this.hoverEnt &&
+        (this.hoverEnt.type === 'line' || this.hoverEnt.type === 'point' || conCircleLike(this.hoverEnt)) &&
+        this.picks.indexOf(this.hoverEnt.id) < 0) {
+        return { type: 'collinear', ids: [this.picks[0], this.hoverEnt.id] };
+      }
+      return null;
+    },
+    finish: function () {
+      if (this.picks.length < 2) { App.toast('共线约束至少需要两个图形'); return; }
+      App.toast('共线约束已完成');
+      this.reset();
+      App.updatePrompt();
+      App.refresh();
+    }
+  });
+
+  const tangentTool = makeConstraintTool({
+    id: 'ctan', name: '相切', icon: 'T', type: 'tangent',
+    prompt: function () {
+      return this.picks.length ? '点按第二个圆 / 圆弧 / 直线' : '点按第一个圆、圆弧或直线';
+    },
+    pick: function (e) {
+      if (!this.picks.length) {
+        this.picks.push(e.id);
+        App.updatePrompt();
+        App.refresh();
+        return;
+      }
+      if (this.picks.indexOf(e.id) >= 0) { App.toast('请点按另一个图形'); return; }
+      const a = App.model.findById(this.picks[0]);
+      const ca = conCircleLike(a), cb = conCircleLike(e);
+      const valid = (a && a.type === 'line' && cb) || (ca && e.type === 'line') || (ca && cb);
+      if (!valid) { App.toast('相切支持圆-圆、圆-圆弧或圆-直线'); return; }
+      commitConstraint('tangent', [a.id, e.id]);
+      App.toast('已添加相切约束');
+      this.reset();
+      App.updatePrompt();
+      App.refresh();
+    },
+    draft: function () {
+      if (this.picks.length !== 1 || !this.hoverEnt || this.hoverEnt.id === this.picks[0]) return null;
+      const a = App.model.findById(this.picks[0]);
+      if (!a) return null;
+      const ca = conCircleLike(a), cb = conCircleLike(this.hoverEnt);
+      const valid = (a.type === 'line' && cb) || (ca && this.hoverEnt.type === 'line') || (ca && cb);
+      return valid ? { type: 'tangent', ids: [a.id, this.hoverEnt.id] } : null;
+    }
+  });
+
+  const distanceTool = makeConstraintTool({
+    id: 'cdist', name: '距离', icon: '↔', type: 'distance',
+    prompt: function () {
+      if (!this.picks.length) return '点按第一个点 / 图形（直线取中点、圆取圆心）';
+      if (this.picks.length === 1) return '点按第二个点 / 图形，按面板距离值固定间距';
+      return '可在面板输入距离后点“确定”重新固定';
+    },
+    pick: function (e) {
+      if (!this.picks.length) {
+        this.picks.push(e.id);
+        App.updatePrompt();
+        App.refresh();
+        return;
+      }
+      if (this.picks.indexOf(e.id) >= 0) { App.toast('请点按另一个图形'); return; }
+      this.picks.push(e.id);
+      this._apply();
+    },
+    _valueFor: function (b) {
+      const v = Number(App.params.dv);
+      if (this._dvTouched && isFinite(v) && v > 0) return v;
+      const a = this.picks.length ? App.model.findById(this.picks[0]) : null;
+      const pa = conRep(a), pb = conRep(b);
+      if (pa && pb) {
+        const d = Geo.dist(pa, pb);
+        if (d > 1e-6) return d;
+      }
+      return isFinite(v) && v > 0 ? v : 50;
+    },
+    _draftValue: function () { return this._valueFor(this.hoverEnt); },
+    _apply: function () {
+      if (this.picks.length < 2) { App.toast('请先点按两个点 / 图形'); return; }
+      const a = App.model.findById(this.picks[0]);
+      const b = App.model.findById(this.picks[1]);
+      if (!a || !b) { this.reset(); return; }
+      const v = this._valueFor(b);
+      App.params.dv = round3(v);
+      if (App.updateParams) App.updateParams();
+      commitConstraint('distance', [a.id, b.id], { value: v });
+      App.toast('已固定间距 ' + fmt(v));
+      this.reset();
+      App.updatePrompt();
+      App.refresh();
+    },
+    draft: function () {
+      if (this.picks.length !== 1 || !this.hoverEnt || this.hoverEnt.id === this.picks[0]) return null;
+      return { type: 'distance', ids: [this.picks[0], this.hoverEnt.id], value: this._draftValue() };
+    },
+    finish: function () { this._apply(); }
+  });
+
+  /** 平行约束：两条直线保持平行 */
+  const parallelConstraintTool = makeConstraintTool({
+    id: 'cpar', name: '平行', icon: '∥', type: 'parallel',
+    prompt: function () {
+      if (!this.picks.length) return '点按第一条直线';
+      return '点按第二条直线，使其与第一条保持平行';
+    },
+    pick: function (e) {
+      if (e.type !== 'line') { App.toast('平行约束仅支持直线'); return; }
+      if (!this.picks.length) {
+        this.picks.push(e.id);
+        App.updatePrompt();
+        App.refresh();
+        return;
+      }
+      if (this.picks.indexOf(e.id) >= 0) { App.toast('请点按另一条直线'); return; }
+      const a = App.model.findById(this.picks[0]);
+      if (!a) { this.reset(); return; }
+      commitConstraint('parallel', [a.id, e.id]);
+      App.toast('已添加平行约束');
+      this.reset();
+      App.updatePrompt();
+      App.refresh();
+    },
+    draft: function () {
+      if (this.picks.length === 1 && this.hoverEnt && this.hoverEnt.type === 'line' &&
+        this.hoverEnt.id !== this.picks[0]) {
+        return { type: 'parallel', ids: [this.picks[0], this.hoverEnt.id] };
+      }
+      return null;
+    }
+  });
+
+  /** 固定约束：图形在约束求解中保持不动 */
+  const fixedConstraintTool = makeConstraintTool({
+    id: 'cfix', name: '固定', icon: '⚓', type: 'fixed',
+    prompt: function () { return '点按一个图形将其固定，后续约束求解不会移动它'; },
+    pick: function (e) {
+      const exist = App.model.constraints.some(function (c) {
+        return c.type === 'fixed' && c.ids && c.ids[0] === e.id;
+      });
+      if (exist) { App.toast('该图形已固定'); return; }
+      commitConstraint('fixed', [e.id]);
+      App.toast('已固定图形 #' + e.id);
+      this.reset();
+      App.updatePrompt();
+      App.refresh();
+    },
+    draft: function () {
+      return this.hoverEnt ? { type: 'fixed', ids: [this.hoverEnt.id] } : null;
+    }
+  });
+
+  /** 角度约束：两条直线按面板角度固定夹角 */
+  const angleConstraintTool = makeConstraintTool({
+    id: 'cang', name: '角度', icon: '∠', type: 'angle',
+    prompt: function () {
+      if (!this.picks.length) return '点按第一条直线';
+      if (this.picks.length === 1) return '点按第二条直线，按面板角度固定夹角';
+      return '可在面板修改角度后点“确定”重新固定';
+    },
+    pick: function (e) {
+      if (e.type !== 'line') { App.toast('角度约束仅支持直线'); return; }
+      if (!this.picks.length) {
+        this.picks.push(e.id);
+        App.updatePrompt();
+        App.refresh();
+        return;
+      }
+      if (this.picks.indexOf(e.id) >= 0) { App.toast('请点按另一条直线'); return; }
+      this.picks.push(e.id);
+      this._apply();
+    },
+    _current: function (a, b) {
+      if (!a || !b || a.type !== 'line' || b.type !== 'line') return null;
+      const da = unitOf(Geo.sub(a.p2, a.p1)), db = unitOf(Geo.sub(b.p2, b.p1));
+      if (!da || !db) return null;
+      const d = Geo.deg(Math.acos(Geo.clamp(da.x * db.x + da.y * db.y, -1, 1)));
+      return d > 1e-6 && d < 180 - 1e-6 ? Math.round(d * 100) / 100 : null;
+    },
+    _valueFor: function () {
+      const v = Number(App.params.av);
+      if (this._avTouched && isFinite(v) && v > 0 && v < 180) return v;
+      const a = App.model.findById(this.picks[0]);
+      const b = this.picks[1] ? App.model.findById(this.picks[1]) : this.hoverEnt;
+      const d = this._current(a, b);
+      if (d) return d;
+      return isFinite(v) && v > 0 && v < 180 ? v : 60;
+    },
+    _apply: function () {
+      if (this.picks.length < 2) { App.toast('请先点按两条直线'); return; }
+      const a = App.model.findById(this.picks[0]);
+      const b = App.model.findById(this.picks[1]);
+      if (!a || !b) { this.reset(); return; }
+      const v = this._valueFor();
+      App.params.av = round3(v);
+      if (App.updateParams) App.updateParams();
+      commitConstraint('angle', [a.id, b.id], { value: v });
+      App.toast('已固定夹角 ' + fmt(v) + '°');
+      this.reset();
+      App.updatePrompt();
+      App.refresh();
+    },
+    draft: function () {
+      if (this.picks.length !== 1 || !this.hoverEnt || this.hoverEnt.type !== 'line' ||
+        this.hoverEnt.id === this.picks[0]) return null;
+      return { type: 'angle', ids: [this.picks[0], this.hoverEnt.id], value: this._valueFor() };
+    },
+    finish: function () { this._apply(); }
+  });
+
+  /** 点在线上约束：点 / 圆心落在直线上 */
+  const onLineConstraintTool = makeConstraintTool({
+    id: 'conl', name: '点在线上', icon: '⌖', type: 'onLine',
+    prompt: function () {
+      if (!this.picks.length) return '点按点 / 圆 / 圆弧（圆自动取圆心），或先点一条直线';
+      return '点按另一条直线 / 点，完成点在线上约束';
+    },
+    pick: function (e) {
+      if (!(e.type === 'line' || e.type === 'point' || conCircleLike(e))) {
+        App.toast('点在线上仅支持点、圆 / 圆弧与直线'); return;
+      }
+      if (!this.picks.length) {
+        this.picks.push(e.id);
+        App.updatePrompt();
+        App.refresh();
+        return;
+      }
+      if (this.picks.indexOf(e.id) >= 0) { App.toast('请点按另一个图形'); return; }
+      const a = App.model.findById(this.picks[0]);
+      if (!a) { this.reset(); return; }
+      const valid = (a.type === 'line' && e.type !== 'line') || (a.type !== 'line' && e.type === 'line');
+      if (!valid) { App.toast('请在点 / 圆 / 圆弧与直线之间建立约束'); return; }
+      this.picks.push(e.id);
+      commitConstraint('onLine', [a.id, e.id]);
+      App.toast('已添加点在线上约束');
+      this.reset();
+      App.updatePrompt();
+      App.refresh();
+    },
+    draft: function () {
+      if (this.picks.length !== 1 || !this.hoverEnt || this.hoverEnt.id === this.picks[0]) return null;
+      const a = App.model.findById(this.picks[0]);
+      if (!a) return null;
+      const valid = (a.type === 'line' && this.hoverEnt.type !== 'line') ||
+        (a.type !== 'line' && this.hoverEnt.type === 'line');
+      return valid ? { type: 'onLine', ids: [a.id, this.hoverEnt.id] } : null;
+    }
+  });
+
+  /** 重叠约束：先点基准图形，再点要重叠的矩形 / 多边形 / 圆 */
+  const overlapConstraintTool = makeConstraintTool({
+    id: 'conov', name: '重叠', icon: '⧉', type: 'overlap',
+    prompt: function () {
+      if (!this.picks.length) return '点按矩形 / 多边形 / 圆作为基准图形';
+      return '点按另一个图形，自动保持完全重叠或指定重叠比例';
+    },
+    pick: function (e) {
+      const C = global.CADConstraints;
+      if (!C || !C.isClosedShape(e)) { App.toast('重叠约束仅支持矩形、多边形或圆'); return; }
+      if (!this.picks.length) {
+        this.picks.push(e.id);
+        App.updatePrompt();
+        App.refresh();
+        return;
+      }
+      if (this.picks.indexOf(e.id) >= 0) { App.toast('请点按另一个图形'); return; }
+      const mode = App.params.omode === 'ratio' ? 'ratio' : 'full';
+      const value = mode === 'ratio' ? Number(App.params.oratio) : 100;
+      if (mode === 'ratio' && !(value > 0 && value <= 100)) {
+        App.toast('重叠比例需在 1~100% 之间'); return;
+      }
+      commitConstraint('overlap', [this.picks[0], e.id], { mode: mode, value: value });
+      App.toast(mode === 'ratio' ? '已添加重叠约束（' + value + '%）' : '已添加完全重叠约束');
+      this.reset();
+      App.updatePrompt();
+      App.refresh();
+    },
+    draft: function () {
+      if (this.picks.length !== 1 || !this.hoverEnt || this.hoverEnt.id === this.picks[0]) return null;
+      const C = global.CADConstraints;
+      if (!C || !C.isClosedShape(this.hoverEnt)) return null;
+      const mode = App.params.omode === 'ratio' ? 'ratio' : 'full';
+      return {
+        type: 'overlap', ids: [this.picks[0], this.hoverEnt.id],
+        mode: mode, value: mode === 'ratio' ? Number(App.params.oratio) : 100
+      };
+    }
+  });
+
+  /** 约束设置：端点自动重合与线首尾自动链接开关（默认关闭） */
+  const constraintSettingsTool = baseTool({
+    id: 'cset', name: '约束设置', cat: 'constraint', icon: '⛭', dragType: 'pan',
+    prompt: function () {
+      const t = Number(App.params.aet) || 3;
+      const a = App.params.aep ? '端点自动重合 开（阈值 ' + t + '）' : '端点自动重合 关';
+      const b = App.params.llink ? '线首尾自动链接 开' : '线首尾自动链接 关';
+      return a + ' · ' + b + '；点“确定”立即检测一次端点重合';
+    },
+    params: function () {
+      return [
+        { key: 'aep', type: 'toggle', label: '端点自动重合', def: false, group: '端点重合' },
+        {
+          key: 'aet', label: '端点阈值', def: 3, min: 0.01, group: '端点重合',
+          when: function (p) { return p.aep === true; }
+        },
+        { key: 'llink', type: 'toggle', label: '线首尾自动链接', def: false, group: '连续画线' }
+      ];
+    },
+    /** 立即检测一次端点重合；返回新建约束数量 */
+    _detect: function () {
+      const C = global.CADConstraints;
+      if (!C) return 0;
+      let t = Number(App.params.aet);
+      if (!(t > 0)) t = 3;
+      App.params.aet = t;
+      App.begin();
+      const added = C.autoDetectEndpoints(App.model, t);
+      if (added.length) App.end();
+      else App.abort();
+      return added.length;
+    },
+    applyParams: function () {
+      const n = this._detect();
+      if (n > 0) App.toast('已自动建立 ' + n + ' 个端点重合约束');
+      else if (Number(App.params.aet) > 0) App.toast('未发现可自动重合的端点');
+      App.refresh();
+      App.updatePrompt();
+    },
+    onParamChange: function (key, val) {
+      if (key === 'aep') {
+        if (val) {
+          const n = this._detect();
+          const t = Number(App.params.aet) || 3;
+          App.toast('端点自动重合已开启：端点距离小于 ' + t + ' 时自动建立约束' +
+            (n ? '（本次新增 ' + n + ' 个）' : ''));
+        } else {
+          App.toast('端点自动重合已关闭');
+        }
+      } else if (key === 'llink') {
+        App.toast(val
+          ? '线首尾自动链接已开启：连续画线时相邻线段端点自动建立重合约束'
+          : '线首尾自动链接已关闭');
+      }
+    }
+  });
+
+  const constraintManagerTool = baseTool({
+    id: 'cman', name: '约束管理', cat: 'constraint', icon: '⚙', dragType: 'pan',
+    prompt: '查看 / 编辑 / 删除已有几何约束；点按画布恢复约束列表',
+    params: function () {
+      return [{ key: 'cshow', type: 'toggle', label: '显示标记', def: true, group: '约束' }];
+    },
+    activate: function () {
+      this.reset();
+      if (App.showConstraintList) App.showConstraintList();
+    },
+    onTap: function () {
+      if (App.showConstraintList) App.showConstraintList();
+    }
+  });
+
   /* ================= 视图：平移 ================= */
   const panTool = baseTool({
     id: 'pan', name: '平移视图', cat: 'view', icon: '✥', dragType: 'tool',
@@ -1970,9 +3194,12 @@
   });
 
   const list = [
-    lineTool, circleTool, arcTool, pointTool, angleLineTool, parallelTool, offsetTool,
+    lineTool, rectTool, polyTool, circleTool, arcTool, pointTool, angleLineTool, parallelTool, offsetTool,
     selectTool, deleteTool, trimTool, filletTool, stretchTool, moveTool, arrayTool, mirrorTool, rotateTool, chainTool,
-    measureLengthTool, measureAngleTool, measureDistTool, measureCoordTool, propsTool,
+    measureLengthTool, measureAngleTool, measureDistTool, measureCoordTool, propsTool, dimTool,
+    hConstraintTool, vConstraintTool, symmetricTool, collinearTool, tangentTool, distanceTool,
+    parallelConstraintTool, fixedConstraintTool, angleConstraintTool, onLineConstraintTool,
+    overlapConstraintTool, constraintSettingsTool, constraintManagerTool,
     panTool
   ];
 

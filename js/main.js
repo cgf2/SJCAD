@@ -16,10 +16,13 @@
     view: new View(),
     tool: null,
     params: {},
+    paramsOpen: false,
     undoStack: [],
     redoStack: [],
     overlay: null,
     snapInfo: null,
+    dimDrag: null,
+    dimHoverId: null,
     W: 0,
     H: 0,
     _raf: 0
@@ -79,6 +82,14 @@
         consider(Geo.arcStart(e), '端点');
         consider(Geo.arcEnd(e), '端点');
         consider(Geo.entityMidpoint(e), '中点');
+      } else if (e.type === 'rect' || e.type === 'poly') {
+        const pts = e.type === 'rect' ? Geo.rectPoints(e) : Geo.polyPoints(e);
+        const closed = e.type === 'rect' || e.closed !== false;
+        const count = closed ? pts.length : pts.length - 1;
+        pts.forEach(function (q) { consider(q, '端点'); });
+        for (let i = 0; i < count; i++) {
+          consider(Geo.lerp(pts[i], pts[(i + 1) % pts.length], 0.5), '中点');
+        }
       } else if (e.type === 'point') {
         consider(e.p, '点');
       }
@@ -113,9 +124,26 @@
   };
 
   App.end = function () {
+    // 图形变化后清理失效引用并重新求解几何约束，实现“改图形即保持约束”
+    const C = window.CADConstraints;
+    if (C) {
+      App.model.pruneRefs();
+      // 端点自动重合：图形变化后按阈值自动补建约束
+      if (App.params && App.params.aep) {
+        const tol = Number(App.params.aet);
+        if (tol > 0) C.autoDetectEndpoints(App.model, tol);
+      }
+      App.solveConstraints();
+    }
     updateHistoryUI();
     updateCount();
     App.refresh();
+  };
+
+  App.solveConstraints = function () {
+    const C = window.CADConstraints;
+    if (!C) return 0;
+    return C.solve(App.model);
   };
 
   App.abort = function () {
@@ -130,10 +158,14 @@
     App.model.restoreSnapshot(App.undoStack.pop());
     pruneSelection();
     App.overlay = null;
+    App.dimDrag = null;
+    App.dimHoverId = null;
+    canvas.style.cursor = 'default';
     updateCount();
     updateHistoryUI();
     App.afterSelectionChange();
     App.refreshPropsPanel();
+    refreshExtraPanels();
     App.updatePrompt();
     App.toast('已撤销');
   };
@@ -144,13 +176,24 @@
     App.model.restoreSnapshot(App.redoStack.pop());
     pruneSelection();
     App.overlay = null;
+    App.dimDrag = null;
+    App.dimHoverId = null;
+    canvas.style.cursor = 'default';
     updateCount();
     updateHistoryUI();
     App.afterSelectionChange();
     App.refreshPropsPanel();
+    refreshExtraPanels();
     App.updatePrompt();
     App.toast('已重做');
   };
+
+  function refreshExtraPanels() {
+    App.refreshDimPanel();
+    if (!$('infoPanel').classList.contains('hidden') && $('infoTitle').textContent === '几何约束') {
+      App.showConstraintList();
+    }
+  }
 
   function pruneSelection() {
     Array.from(App.model.selected).forEach(function (id) {
@@ -188,8 +231,20 @@
     const fields = raw.filter(function (f) {
       return typeof f.when !== 'function' || f.when(App.params);
     });
-    if (!fields.length) { row.classList.add('hidden'); return; }
-    row.classList.remove('hidden');
+    if (!fields.length) {
+      row.classList.add('hidden');
+      const tg = $('paramToggle');
+      if (tg) tg.classList.add('hidden');
+      return;
+    }
+    row.classList.toggle('hidden', !App.paramsOpen);
+    const tg = $('paramToggle');
+    if (tg) {
+      tg.classList.remove('hidden');
+      tg.classList.toggle('open', !!App.paramsOpen);
+      tg.setAttribute('aria-expanded', App.paramsOpen ? 'true' : 'false');
+      tg.setAttribute('aria-label', App.paramsOpen ? '折叠操作选项' : '展开操作选项');
+    }
     const groups = [], map = {};
     fields.forEach(function (f) {
       const isNum = !f.type || f.type === 'number';
@@ -249,6 +304,11 @@
         if (f.type === 'choice') {
           const wrap = document.createElement('div');
           wrap.className = 'param-field param-choice';
+          if (f.label) {
+            const lb = document.createElement('label');
+            lb.textContent = f.label;
+            wrap.appendChild(lb);
+          }
           const seg = document.createElement('div');
           seg.className = 'seg';
           (f.options || []).forEach(function (opt) {
@@ -312,6 +372,18 @@
     }
   };
 
+  /** 折叠 / 展开操作选项面板（仅在用户主动点击时切换） */
+  App.toggleParams = function (force) {
+    const row = $('paramRow');
+    const tg = $('paramToggle');
+    if (!row || !tg || tg.classList.contains('hidden')) return;
+    App.paramsOpen = typeof force === 'boolean' ? force : !App.paramsOpen;
+    row.classList.toggle('hidden', !App.paramsOpen);
+    tg.classList.toggle('open', !!App.paramsOpen);
+    tg.setAttribute('aria-expanded', App.paramsOpen ? 'true' : 'false');
+    tg.setAttribute('aria-label', App.paramsOpen ? '折叠操作选项' : '展开操作选项');
+  };
+
   App.toast = function (msg) {
     const el = $('toast');
     el.textContent = msg;
@@ -343,7 +415,7 @@
   }
 
   function propsHtml(ent) {
-    const names = { line: '直线', circle: '圆', arc: '圆弧', point: '点' };
+    const names = { line: '直线', circle: '圆', arc: '圆弧', point: '点', rect: '矩形', poly: '多边形' };
     let html = '<div class="row"><span class="k">类型</span><span class="v">' + (names[ent.type] || ent.type) + '</span></div>';
     if (ent.type === 'line') {
       html += propInput('起点 X', 'x1', ent.p1.x) + propInput('起点 Y', 'y1', ent.p1.y);
@@ -365,6 +437,20 @@
       html += propOut('方向', 'dir', ent.ccw ? '逆时针' : '顺时针');
     } else if (ent.type === 'point') {
       html += propInput('X', 'x', ent.p.x) + propInput('Y', 'y', ent.p.y);
+    } else if (ent.type === 'rect') {
+      html += propInput('左下 X', 'x1', ent.x1) + propInput('左下 Y', 'y1', ent.y1);
+      html += propInput('右上 X', 'x2', ent.x2) + propInput('右上 Y', 'y2', ent.y2);
+      html += propOut('宽', 'w', fmt(ent.x2 - ent.x1));
+      html += propOut('高', 'h', fmt(ent.y2 - ent.y1));
+      html += propOut('周长', 'perim', fmt(Geo.entityLength(ent)));
+    } else if (ent.type === 'poly') {
+      html += propOut('边数', 'sides', String((ent.pts || []).length));
+      (ent.pts || []).forEach(function (q, i) {
+        html += propInput('顶点 ' + (i + 1) + ' X', 'v' + i + 'x', q.x);
+        html += propInput('顶点 ' + (i + 1) + ' Y', 'v' + i + 'y', q.y);
+      });
+      html += propOut('周长', 'perim', fmt(Geo.entityLength(ent)));
+      html += propOut('面积', 'area', fmt(Math.abs(Geo.polyArea(ent.pts || []))));
     }
     html += '<div class="prop-tip">修改数值即时生效，可撤销</div>';
     html += '<div id="propError" class="prop-error hidden"></div>';
@@ -383,6 +469,13 @@
       map.sw = fmt(Geo.deg(Geo.arcSweep(ent))) + '°';
       map.arclen = fmt(Geo.arcSweep(ent) * ent.r);
       map.dir = ent.ccw ? '逆时针' : '顺时针';
+    } else if (ent.type === 'rect') {
+      map.w = fmt(ent.x2 - ent.x1);
+      map.h = fmt(ent.y2 - ent.y1);
+      map.perim = fmt(Geo.entityLength(ent));
+    } else if (ent.type === 'poly') {
+      map.perim = fmt(Geo.entityLength(ent));
+      map.area = fmt(Math.abs(Geo.polyArea(ent.pts || [])));
     }
     const body = $('infoBody');
     Object.keys(map).forEach(function (k) {
@@ -406,6 +499,41 @@
     $('selBar').classList.add('hidden');
   };
 
+  /* ---------------- 尺寸标注面板 / 尺寸驱动 ---------------- */
+  let dimDirty = false;
+  App.dimId = null;
+
+  function endDimSession() {
+    if (!dimDirty) return;
+    dimDirty = false;
+    App.end();
+  }
+
+  App.showDim = function (id) {
+    const D = window.CADDims;
+    const dim = App.model.findDim(id);
+    if (!D || !dim) { App.hideInfo(); return; }
+    App.showInfo('尺寸标注', D.infoHtml(App.model, dim));
+    App.dimId = id;
+  };
+
+  App.refreshDimPanel = function () {
+    if (!App.dimId) return;
+    const D = window.CADDims;
+    const dim = App.model.findDim(App.dimId);
+    if (!D || !dim) { App.dimId = null; App.hideInfo(); return; }
+    $('infoTitle').textContent = '尺寸标注';
+    $('infoBody').innerHTML = D.infoHtml(App.model, dim);
+    $('infoPanel').classList.remove('hidden');
+    $('selBar').classList.add('hidden');
+  };
+
+  App.showConstraintList = function () {
+    const C = window.CADConstraints;
+    if (!C) return;
+    App.showInfo('几何约束', C.listHtml(App.model));
+  };
+
   function setPropError(input, msg) {
     input.classList.toggle('invalid', !!msg);
     const box = $('propError');
@@ -415,9 +543,43 @@
     }
   }
 
+  function onDimInput(input) {
+    const D = window.CADDims;
+    if (!D) return;
+    const dim = App.model.findDim(input.dataset.dim);
+    if (!dim) return;
+    const check = D.setValue(App.model, dim, input.value, true);
+    if (!check.ok) { setPropError(input, check.error); return; }
+    setPropError(input, '');
+    if (!dimDirty) { dimDirty = true; App.begin(); }
+    D.setValue(App.model, dim, input.value, false);
+    App.solveConstraints();
+    D.updateOutputs($('infoBody'), App.model, dim);
+    App.refresh();
+  }
+
+  /** 标注样式（字体 / 字号 / 颜色 / 线型）即时修改 */
+  function onDimStyleInput(input) {
+    const D = window.CADDims;
+    if (!D || !D.setStyle) return;
+    const dim = App.model.findDim(input.dataset.dimRef || '');
+    if (!dim) return;
+    const key = input.dataset.dimStyle;
+    // 先用临时对象校验，通过后再写入（保证首次修改也被撤销栈覆盖）
+    const check = D.setStyle({}, key, input.value);
+    if (!check.ok) { setPropError(input, check.error); return; }
+    setPropError(input, '');
+    if (!dimDirty) { dimDirty = true; App.begin(); }
+    D.setStyle(dim, key, input.value);
+    App.refresh();
+  }
+
   function onPropInput(e) {
     const input = e.target;
-    if (!input || !input.dataset || !input.dataset.k || !App.propsEntId) return;
+    if (!input || !input.dataset) return;
+    if (input.dataset.dim) { onDimInput(input); return; }
+    if (input.dataset.dimStyle) { onDimStyleInput(input); return; }
+    if (!input.dataset.k || !App.propsEntId) return;
     const ent = App.model.findById(App.propsEntId);
     if (!ent) return;
     const check = Geo.setEntityProp(ent, input.dataset.k, input.value, true);
@@ -425,13 +587,16 @@
     setPropError(input, '');
     if (!propsDirty) { propsDirty = true; App.begin(); }
     Geo.setEntityProp(ent, input.dataset.k, input.value, false);
+    App.solveConstraints();
     updatePropsOutputs(ent);
     App.refresh();
   }
 
   App.showInfo = function (title, html) {
     endPropsSession();
+    endDimSession();
     App.propsEntId = null;
+    App.dimId = null;
     $('infoTitle').textContent = title;
     $('infoBody').innerHTML = html;
     $('infoPanel').classList.remove('hidden');
@@ -440,7 +605,9 @@
 
   App.hideInfo = function () {
     endPropsSession();
+    endDimSession();
     App.propsEntId = null;
+    App.dimId = null;
     $('infoPanel').classList.add('hidden');
     updateSelBar();
   };
@@ -451,7 +618,7 @@
   };
 
   App.entityInfo = function (ent, withId) {
-    const names = { line: '直线', circle: '圆', arc: '圆弧', point: '点' };
+    const names = { line: '直线', circle: '圆', arc: '圆弧', point: '点', rect: '矩形', poly: '多边形' };
     function row(k, v) {
       return '<div class="row"><span class="k">' + k + '</span><span class="v">' + v + '</span></div>';
     }
@@ -477,14 +644,27 @@
       html += row('方向', ent.ccw ? '逆时针' : '顺时针');
     } else if (ent.type === 'point') {
       html += row('坐标', '(' + fmt(ent.p.x) + ', ' + fmt(ent.p.y) + ')');
+    } else if (ent.type === 'rect') {
+      html += row('左下角', '(' + fmt(ent.x1) + ', ' + fmt(ent.y1) + ')');
+      html += row('右上角', '(' + fmt(ent.x2) + ', ' + fmt(ent.y2) + ')');
+      html += row('宽 × 高', fmt(ent.x2 - ent.x1) + ' × ' + fmt(ent.y2 - ent.y1));
+      html += row('周长', fmt(Geo.entityLength(ent)));
+    } else if (ent.type === 'poly') {
+      html += row('边数', String((ent.pts || []).length));
+      html += row('周长', fmt(Geo.entityLength(ent)));
+      html += row('面积', fmt(Math.abs(Geo.polyArea(ent.pts || []))));
     }
     return html;
   };
 
   /* ---------------- 工具切换 ---------------- */
-  App.setTool = function (id) {
+  App.setTool = function (id, silent) {
     const next = Tools.byId(id);
     if (!next) return;
+    // 切换工具时不自动展开操作选项，需由用户主动点击展开
+    App.paramsOpen = false;
+    App.dimHoverId = null;
+    canvas.style.cursor = 'default';
     if (App.tool === next) {
       App.tool.reset();
       App.overlay = null;
@@ -492,7 +672,7 @@
       updateToolChips();
       App.updatePrompt();
       App.updateParams();
-      App.toast('已重置「' + next.name + '」');
+      if (!silent) App.toast('已重置「' + next.name + '」');
       App.refresh();
       return;
     }
@@ -605,6 +785,35 @@
 
   function worldAtScreen(sp) { return App.view.toWorld(sp); }
 
+  /** 查询模块下命中已存在的标注线 */
+  function dimLineAtScreen(sp) {
+    const D = window.CADDims;
+    if (!D || !D.hitLine) return null;
+    if (!App.tool || App.tool.cat !== 'query') return null;
+    return D.hitLine(App, sp, 6);
+  }
+
+  /** 取消标注线拖拽；restore=true 时还原拖动前的偏移 / 锚点与数值位置 */
+  function cancelDimDrag(restore) {
+    const dd = App.dimDrag;
+    if (!dd) return;
+    const dim = App.model.findDim(dd.id);
+    if (dim && restore) {
+      if (dd.hadOffset) dim.offset = dd.origOffset;
+      else delete dim.offset;
+      if (dd.hasAnchor) dim.anchor = { x: dd.origAnchor.x, y: dd.origAnchor.y };
+      else delete dim.anchor;
+      if (dd.hasParam) dim.param = dd.origParam;
+      else delete dim.param;
+      if (dd.origLabel) dim.labelPos = { x: dd.origLabel.x, y: dd.origLabel.y };
+      else delete dim.labelPos;
+    }
+    if (dd.begun) App.abort();
+    App.dimDrag = null;
+    canvas.style.cursor = 'default';
+    App.refresh();
+  }
+
   function pinchState() {
     const pts = Array.from(pointers.values());
     if (pts.length < 2) return null;
@@ -614,6 +823,48 @@
       mid: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
     };
   }
+
+  /** 取消：终止未完成手势 / 图形操作，清理临时状态并回到初始可选择状态 */
+  App.cancelOperation = function () {
+    if (App.dimDrag) cancelDimDrag(true);
+    App.dimHoverId = null;
+    canvas.style.cursor = 'default';
+    if (dragging && App.tool && typeof App.tool.onDragCancel === 'function') {
+      try { App.tool.onDragCancel(); } catch (err) { /* 忽略工具取消异常 */ }
+    }
+    pointers.clear();
+    pinch = null;
+    down = null;
+    dragging = false;
+    previewing = false;
+    multi = false;
+    lastTap = null;
+    panLast = null;
+    App.overlay = null;
+    App.snapInfo = null;
+    if (App._snapTimer) { clearTimeout(App._snapTimer); App._snapTimer = null; }
+
+    App.model.selected.clear();
+    App.hideInfo();
+    App.paramsOpen = false;
+
+    // 还原各工具参数默认值，清除上一次操作的选项缓存
+    Tools.list.forEach(function (t) {
+      if (typeof t.params !== 'function') return;
+      let defs = [];
+      try { defs = t.params() || []; } catch (err) { defs = []; }
+      defs.forEach(function (f) {
+        if (f && f.def !== undefined) App.params[f.key] = f.def;
+      });
+    });
+
+    App.setTool('select', true);
+    App._prevTool = 'select';
+    App.afterSelectionChange();
+    App.updateParams();
+    App.refresh();
+    App.toast('已取消当前操作');
+  };
 
   canvas.addEventListener('pointerdown', function (e) {
     e.preventDefault();
@@ -633,7 +884,27 @@
       dragging = false;
       previewing = false;
       multi = false;
+      const dimHit = dimLineAtScreen(sp);
+      if (dimHit) {
+        App.dimDrag = {
+          id: dimHit.id,
+          origOffset: typeof dimHit.offset === 'number' ? dimHit.offset : 0,
+          hadOffset: typeof dimHit.offset === 'number',
+          origAnchor: dimHit.anchor ? { x: dimHit.anchor.x, y: dimHit.anchor.y } : { x: 0, y: 0 },
+          hasAnchor: !!dimHit.anchor,
+          origParam: typeof dimHit.param === 'number' ? dimHit.param : 0,
+          hasParam: typeof dimHit.param === 'number',
+          origLabel: dimHit.labelPos ? { x: dimHit.labelPos.x, y: dimHit.labelPos.y } : null,
+          begun: false,
+          moved: false
+        };
+        if (App.tool && typeof App.tool.reset === 'function') App.tool.reset();
+        App.overlay = null;
+        canvas.style.cursor = 'grabbing';
+        App.refresh();
+      }
     } else if (pointers.size === 2) {
+      if (App.dimDrag) cancelDimDrag(true);
       if (dragging && App.tool && App.tool.onDragCancel) App.tool.onDragCancel();
       dragging = false;
       previewing = false;
@@ -655,9 +926,58 @@
   });
 
   canvas.addEventListener('pointermove', function (e) {
-    if (!pointers.has(e.pointerId)) return;
     const sp = localPoint(e);
+    if (!pointers.has(e.pointerId)) {
+      if (e.pointerType === 'mouse') {
+        // 查询模块下悬停标注线：加粗高亮并显示可拖拽光标
+        const hover = dimLineAtScreen(sp);
+        if (hover) {
+          if (App.dimHoverId !== hover.id) {
+            App.dimHoverId = hover.id;
+            App.refresh();
+          }
+          canvas.style.cursor = 'grab';
+          return;
+        }
+        if (App.dimHoverId) {
+          App.dimHoverId = null;
+          App.refresh();
+        }
+        canvas.style.cursor = 'default';
+        if (!down && App.tool && App.tool.hoverLive && App.tool.onHover) {
+          App.tool.onHover(worldAtScreen(sp));
+          App.refresh();
+        }
+      }
+      return;
+    }
     pointers.set(e.pointerId, sp);
+
+    if (App.dimDrag) {
+      if (pointers.size >= 2) { cancelDimDrag(true); return; }
+      if (!down) return;
+      const mx = sp.x - down.screen.x;
+      const my = sp.y - down.screen.y;
+      if (!App.dimDrag.moved && Math.hypot(mx, my) <= 4) return;
+      if (!App.dimDrag.begun) {
+        App.begin();
+        App.dimDrag.begun = true;
+        const dim = App.model.findDim(App.dimDrag.id);
+        // 联动模式：数值跟随标注线，清除历史冻结坐标
+        if (dim && dim.labelPos) delete dim.labelPos;
+      }
+      App.dimDrag.moved = true;
+      down.moved = true;
+      const dim = App.model.findDim(App.dimDrag.id);
+      if (!dim) { cancelDimDrag(true); return; }
+      const D = window.CADDims;
+      if (!D || !D.moveLine || !D.moveLine(App, dim, worldAtScreen(sp))) {
+        cancelDimDrag(true);
+        return;
+      }
+      App.refresh();
+      return;
+    }
 
     if (pointers.size >= 2) {
       const st = pinchState();
@@ -722,6 +1042,24 @@
     const sp = localPoint(e);
     pointers.delete(e.pointerId);
 
+    if (App.dimDrag) {
+      const dd = App.dimDrag;
+      const dim = App.model.findDim(dd.id);
+      App.dimDrag = null;
+      canvas.style.cursor = 'grab';
+      if (dd.moved) {
+        if (dd.begun) App.end();
+        App.toast('标注线位置已更新');
+        App.refresh();
+        App.updatePrompt();
+      } else {
+        if (dd.begun) App.abort();
+        if (dim) App.showDim(dim.id);
+      }
+      if (pointers.size === 0) { down = null; multi = false; }
+      return;
+    }
+
     if (pinch) {
       if (pointers.size < 2) pinch = null;
       if (pointers.size === 0) { down = null; multi = false; }
@@ -757,6 +1095,7 @@
   canvas.addEventListener('pointerup', endPointer);
   canvas.addEventListener('pointercancel', function (e) {
     pointers.delete(e.pointerId);
+    if (App.dimDrag) cancelDimDrag(true);
     if (pinch) pinch = null;
     if (dragging && App.tool && App.tool.onDragCancel) App.tool.onDragCancel();
     dragging = false;
@@ -765,7 +1104,21 @@
     multi = false;
     App.refresh();
   });
-  canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+  canvas.addEventListener('contextmenu', function (e) {
+    e.preventDefault();
+    if (App.tool && typeof App.tool.onRightClick === 'function') App.tool.onRightClick(e);
+  });
+  canvas.addEventListener('pointerleave', function () {
+    if (App.dimHoverId) {
+      App.dimHoverId = null;
+      canvas.style.cursor = 'default';
+      App.refresh();
+    }
+    if (App.tool && App.tool.hoverLive) {
+      App.tool.hoverEnt = null;
+      App.refresh();
+    }
+  });
 
   function handleTap(world, screen) {
     if (!App.tool) return;
@@ -922,7 +1275,7 @@
     updateToolChips();
   }
 
-  document.querySelectorAll('#viewDock .vbtn').forEach(function (btn) {
+  document.querySelectorAll('#viewDock .vbtn[data-view]').forEach(function (btn) {
     btn.addEventListener('click', function () {
       const act = btn.dataset.view;
       if (act === 'in') App.view.zoomCenter(1.3, App.W, App.H);
@@ -937,6 +1290,8 @@
     });
   });
 
+  $('btnCancel').addEventListener('click', App.cancelOperation);
+  $('paramToggle').addEventListener('click', function () { App.toggleParams(); });
   $('btnUndo').addEventListener('click', App.undo);
   $('btnRedo').addEventListener('click', App.redo);
   $('btnScript').addEventListener('click', openScript);
@@ -947,7 +1302,63 @@
   $('infoClose').addEventListener('click', App.hideInfo);
   $('infoBody').addEventListener('input', onPropInput);
   $('infoBody').addEventListener('focusout', function (e) {
-    if (e.target && e.target.dataset && e.target.dataset.k) endPropsSession();
+    if (!e.target || !e.target.dataset) return;
+    if (e.target.dataset.k) endPropsSession();
+    if (e.target.dataset.dim) endDimSession();
+    if (e.target.dataset.dimStyle) endDimSession();
+  });
+  $('infoBody').addEventListener('click', function (e) {
+    const t = e.target;
+    if (!t || !t.dataset) return;
+    if (t.dataset.dimDel) {
+      endDimSession();
+      App.begin();
+      App.model.removeDim(t.dataset.dimDel);
+      App.end();
+      App.hideInfo();
+      App.toast('已删除标注');
+      return;
+    }
+    if (t.dataset.conDel) {
+      App.begin();
+      App.model.removeConstraint(t.dataset.conDel);
+      App.end();
+      App.showConstraintList();
+      App.toast('已删除约束');
+      return;
+    }
+    if (t.tagName === 'INPUT' || t.tagName === 'BUTTON') return;
+    const row = t.closest ? t.closest('[data-con-sel]') : null;
+    if (!row) return;
+    const con = App.model.findConstraint(row.dataset.conSel);
+    if (!con) return;
+    const ids = (con.ids || []).slice();
+    if (con.axisId) ids.push(con.axisId);
+    App.model.selected = new Set(ids);
+    App.afterSelectionChange();
+    App.refresh();
+  });
+  $('infoBody').addEventListener('change', function (e) {
+    const t = e.target;
+    if (!t || !t.dataset) return;
+    if (t.dataset.dimStyle) { onDimStyleInput(t); return; }
+    if (!t.dataset.conValue) return;
+    const con = App.model.findConstraint(t.dataset.conValue);
+    if (!con) return;
+    const isAngle = con.type === 'angle';
+    const isOverlap = con.type === 'overlap';
+    const v = Number(t.value);
+    if (!isFinite(v) || (isAngle ? !(v > 0 && v < 180) : isOverlap ? !(v > 0 && v <= 100) : !(v > 0))) {
+      App.toast(isAngle ? '角度需在 0~180° 之间' : isOverlap ? '重叠比例需在 1~100% 之间' : '距离需大于 0');
+      App.showConstraintList();
+      return;
+    }
+    App.begin();
+    con.value = Math.round(v * 1000) / 1000;
+    App.solveConstraints();
+    App.end();
+    App.showConstraintList();
+    App.toast(isAngle ? '角度约束已更新' : isOverlap ? '重叠比例已更新' : '距离约束已更新');
   });
   $('helpClose').addEventListener('click', function () { $('helpModal').classList.add('hidden'); });
   $('btnSelDelete').addEventListener('click', function () {

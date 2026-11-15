@@ -120,11 +120,43 @@
 
   /* ---------- 图元基础 ---------- */
   function isCircleLike(ent) { return ent.type === 'circle' || ent.type === 'arc'; }
+  function isPolyLike(ent) { return !!ent && (ent.type === 'rect' || ent.type === 'poly'); }
+
+  function rectPoints(ent) {
+    return [P(ent.x1, ent.y1), P(ent.x2, ent.y1), P(ent.x2, ent.y2), P(ent.x1, ent.y2)];
+  }
+
+  function polyPoints(ent) {
+    return (ent.pts || []).map(cloneP);
+  }
+
+  /** 矩形 / 多边形的描边顶点（闭合时首尾重复一个点） */
+  function closedPoints(ent) {
+    const pts = ent.type === 'rect' ? rectPoints(ent) : polyPoints(ent);
+    if (ent.type === 'poly' && ent.closed === false) return pts;
+    if (pts.length) pts.push(cloneP(pts[0]));
+    return pts;
+  }
+
+  /** 矩形 / 多边形拆成线段，便于求交、拾取与偏移 */
+  function polySegments(ent) {
+    const pts = ent.type === 'rect' ? rectPoints(ent) : polyPoints(ent);
+    const closed = ent.type === 'rect' || ent.closed !== false;
+    const segs = [];
+    const count = closed ? pts.length : pts.length - 1;
+    for (let i = 0; i < count; i++) {
+      const a = pts[i], b = pts[(i + 1) % pts.length];
+      if (dist(a, b) < EPS) continue;
+      segs.push({ type: 'line', p1: cloneP(a), p2: cloneP(b) });
+    }
+    return segs;
+  }
 
   function entityPolyline(ent, segs) {
     segs = segs || 64;
     if (ent.type === 'line') return [cloneP(ent.p1), cloneP(ent.p2)];
     if (ent.type === 'point') return [cloneP(ent.p)];
+    if (isPolyLike(ent)) return closedPoints(ent);
     if (ent.type === 'circle') {
       const out = [];
       for (let i = 0; i <= segs; i++) out.push(polar(ent.c, ent.r, i / segs * TAU));
@@ -147,13 +179,24 @@
     if (ent.type === 'line') return [cloneP(ent.p1), cloneP(ent.p2)];
     if (ent.type === 'point') return [cloneP(ent.p)];
     if (ent.type === 'arc') return [arcStart(ent), arcEnd(ent)];
+    if (ent.type === 'rect') return rectPoints(ent);
+    if (ent.type === 'poly') return polyPoints(ent);
     return [];
+  }
+
+  function polylineLength(pts, closed) {
+    let total = 0;
+    const count = closed ? pts.length : pts.length - 1;
+    for (let i = 0; i < count; i++) total += dist(pts[i], pts[(i + 1) % pts.length]);
+    return total;
   }
 
   function entityLength(ent) {
     if (ent.type === 'line') return dist(ent.p1, ent.p2);
     if (ent.type === 'circle') return TAU * ent.r;
     if (ent.type === 'arc') return arcSweep(ent) * ent.r;
+    if (ent.type === 'rect') return 2 * ((ent.x2 - ent.x1) + (ent.y2 - ent.y1));
+    if (ent.type === 'poly') return polylineLength(polyPoints(ent), ent.closed !== false);
     return 0;
   }
 
@@ -165,7 +208,21 @@
       const sw = arcSweep(ent);
       return polar(ent.c, ent.r, ent.ccw ? ent.a0 + sw / 2 : ent.a0 - sw / 2);
     }
+    if (isPolyLike(ent)) {
+      const b = entityBBox(ent);
+      return P((b.x1 + b.x2) / 2, (b.y1 + b.y2) / 2);
+    }
     return P(0, 0);
+  }
+
+  function polyHitDistance(pts, closed, p) {
+    let best = Infinity;
+    const count = closed ? pts.length : pts.length - 1;
+    for (let i = 0; i < count; i++) {
+      const d = closestOnSeg(p, pts[i], pts[(i + 1) % pts.length]).dist;
+      if (d < best) best = d;
+    }
+    return best;
   }
 
   function hitDistance(ent, p) {
@@ -177,6 +234,8 @@
       if (angleOnArc(a, ent)) return Math.abs(dist(p, ent.c) - ent.r);
       return Math.min(dist(p, arcStart(ent)), dist(p, arcEnd(ent)));
     }
+    if (ent.type === 'rect') return polyHitDistance(rectPoints(ent), true, p);
+    if (ent.type === 'poly') return polyHitDistance(polyPoints(ent), ent.closed !== false, p);
     return Infinity;
   }
 
@@ -209,6 +268,14 @@
   }
 
   function translateEntity(ent, dx, dy) {
+    if (ent.type === 'rect') {
+      ent.x1 += dx; ent.x2 += dx; ent.y1 += dy; ent.y2 += dy;
+      return ent;
+    }
+    if (ent.type === 'poly' && ent.pts) {
+      ent.pts.forEach(function (q) { q.x += dx; q.y += dy; });
+      return ent;
+    }
     if (ent.p1) { ent.p1.x += dx; ent.p1.y += dy; }
     if (ent.p2) { ent.p2.x += dx; ent.p2.y += dy; }
     if (ent.p) { ent.p.x += dx; ent.p.y += dy; }
@@ -223,6 +290,24 @@
   }
 
   function rotateEntity(ent, base, ang) {
+    if (ent.type === 'rect') {
+      const pts = rectPoints(ent).map(function (q) { return rotatePoint(q, base, ang); });
+      // 旋转 90° 的整数倍时仍是轴对齐矩形，其余角度转换为多边形
+      if (Math.abs(Math.sin(ang)) < 1e-9 || Math.abs(Math.cos(ang)) < 1e-9) {
+        const b = entityBBox({ type: 'poly', pts: pts, closed: true });
+        ent.x1 = b.x1; ent.y1 = b.y1; ent.x2 = b.x2; ent.y2 = b.y2;
+      } else {
+        ent.type = 'poly';
+        ent.pts = pts;
+        ent.closed = true;
+        delete ent.x1; delete ent.y1; delete ent.x2; delete ent.y2;
+      }
+      return ent;
+    }
+    if (ent.type === 'poly') {
+      ent.pts = (ent.pts || []).map(function (q) { return rotatePoint(q, base, ang); });
+      return ent;
+    }
     ['p1', 'p2', 'p', 'c'].forEach(function (k) {
       if (ent[k]) ent[k] = rotatePoint(ent[k], base, ang);
     });
@@ -231,11 +316,26 @@
   }
 
   function copyShape(target, src) {
-    ['p1', 'p2', 'p', 'c'].forEach(function (k) {
-      if (src[k]) target[k] = cloneP(src[k]);
-    });
-    if (typeof src.r === 'number') target.r = src.r;
-    if (typeof src.a0 === 'number') { target.a0 = src.a0; target.a1 = src.a1; target.ccw = src.ccw; }
+    target.type = src.type;
+    if (src.type === 'rect') {
+      ['x1', 'y1', 'x2', 'y2'].forEach(function (k) { target[k] = src[k]; });
+      delete target.pts;
+    } else if (src.type === 'poly') {
+      target.pts = (src.pts || []).map(cloneP);
+      target.closed = src.closed !== false;
+      delete target.x1; delete target.y1; delete target.x2; delete target.y2;
+    } else {
+      ['p1', 'p2', 'p', 'c'].forEach(function (k) {
+        if (src[k]) target[k] = cloneP(src[k]);
+      });
+      if (typeof src.r === 'number') target.r = src.r;
+      if (typeof src.a0 === 'number') { target.a0 = src.a0; target.a1 = src.a1; target.ccw = src.ccw; }
+      delete target.pts; delete target.x1; delete target.y1; delete target.x2; delete target.y2;
+    }
+    if (typeof src.style === 'string') target.style = src.style;
+    else delete target.style;
+    if (typeof src.fill === 'string') target.fill = src.fill;
+    else delete target.fill;
     return target;
   }
 
@@ -504,6 +604,35 @@
       if (!dryRun) ent.p = p;
       return { ok: true };
     }
+    if (ent.type === 'rect') {
+      const r = { x1: ent.x1, y1: ent.y1, x2: ent.x2, y2: ent.y2 };
+      if (key === 'x1') r.x1 = v;
+      else if (key === 'y1') r.y1 = v;
+      else if (key === 'x2') r.x2 = v;
+      else if (key === 'y2') r.y2 = v;
+      else if (key === 'w') {
+        if (!(v > 1e-6)) return { ok: false, error: '宽度必须大于 0' };
+        r.x2 = r.x1 + v;
+      } else if (key === 'h') {
+        if (!(v > 1e-6)) return { ok: false, error: '高度必须大于 0' };
+        r.y2 = r.y1 + v;
+      } else return { ok: false, error: '该属性不可编辑' };
+      const n = normalizeRect(r.x1, r.y1, r.x2, r.y2);
+      if (n.x2 - n.x1 < 1e-6 || n.y2 - n.y1 < 1e-6) return { ok: false, error: '矩形宽高不能为 0' };
+      if (!dryRun) { ent.x1 = n.x1; ent.y1 = n.y1; ent.x2 = n.x2; ent.y2 = n.y2; }
+      return { ok: true };
+    }
+    if (ent.type === 'poly') {
+      const m = /^v(\d+)(x|y)$/.exec(key);
+      if (!m) return { ok: false, error: '该属性不可编辑' };
+      const idx = Number(m[1]);
+      if (!ent.pts || idx < 0 || idx >= ent.pts.length) return { ok: false, error: '顶点不存在' };
+      const pts = ent.pts.map(cloneP);
+      pts[idx][m[2]] = v;
+      if (Math.abs(polyArea(pts)) < 1e-9) return { ok: false, error: '多边形面积不能为 0' };
+      if (!dryRun) ent.pts = pts;
+      return { ok: true };
+    }
     return { ok: false, error: '该图元不可编辑' };
   }
 
@@ -520,6 +649,16 @@
     const arcFilter = function (ent) {
       return function (p) { return angleOnArc(angleOf(ent.c, p), ent); };
     };
+
+    // 矩形 / 多边形按边拆成线段后逐对求交
+    if (isPolyLike(a) || isPolyLike(b)) {
+      const ea = isPolyLike(a) ? polySegments(a) : [a];
+      const eb = isPolyLike(b) ? polySegments(b) : [b];
+      ea.forEach(function (sa) {
+        eb.forEach(function (sb) { push(intersections(sa, sb)); });
+      });
+      return out;
+    }
 
     if (a.type === 'line' && b.type === 'line') {
       push(lineLineIntersect(a.p1, a.p2, b.p1, b.p2));
@@ -695,6 +834,21 @@
         a0: normAngle(2 * ax - ent.a0), a1: normAngle(2 * ax - ent.a1), ccw: !ent.ccw
       };
     }
+    if (ent.type === 'rect' || ent.type === 'poly') {
+      const pts = (ent.type === 'rect' ? rectPoints(ent) : polyPoints(ent))
+        .map(function (q) { return mirrorPoint(q, a, b); });
+      const out = { type: 'poly', pts: pts, closed: true };
+      if (typeof ent.style === 'string') out.style = ent.style;
+      if (typeof ent.fill === 'string') out.fill = ent.fill;
+      // 沿水平 / 垂直轴镜像后仍可用轴对齐矩形表示
+      if (ent.type === 'rect' && (Math.abs(b.y - a.y) < 1e-9 || Math.abs(b.x - a.x) < 1e-9)) {
+        const bb = entityBBox(out);
+        out.type = 'rect';
+        out.x1 = bb.x1; out.y1 = bb.y1; out.x2 = bb.x2; out.y2 = bb.y2;
+        delete out.pts;
+      }
+      return out;
+    }
     return null;
   }
 
@@ -784,6 +938,8 @@
     circleCircleIntersect: circleCircleIntersect,
     arcSweep: arcSweep, angleOnArc: angleOnArc, arcStart: arcStart, arcEnd: arcEnd,
     isCircleLike: isCircleLike,
+    isPolyLike: isPolyLike, rectPoints: rectPoints, polyPoints: polyPoints,
+    polySegments: polySegments, polyArea: polyArea,
     entityPolyline: entityPolyline, entityEndpoints: entityEndpoints,
     entityLength: entityLength, entityMidpoint: entityMidpoint,
     hitDistance: hitDistance, entityBBox: entityBBox, bboxOf: bboxOf,

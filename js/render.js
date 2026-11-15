@@ -16,6 +16,13 @@
     text: '#dbe7f0'
   };
 
+  const FILLS = {
+    blue: 'rgba(55, 200, 255, 0.15)',
+    green: 'rgba(64, 220, 150, 0.15)',
+    orange: 'rgba(255, 176, 32, 0.15)',
+    purple: 'rgba(170, 130, 255, 0.16)'
+  };
+
   function Renderer(canvas, app) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
@@ -74,8 +81,14 @@
       this.strokeEntity(e, COLORS.selected, 2.4, true);
     }, this);
 
+    // 尺寸标注
+    if (global.CADDims) global.CADDims.draw(this, app);
+
     // 测量标注
     if (app.overlay) this.drawOverlay(app.overlay);
+
+    // 几何约束标记
+    if (global.CADConstraints) global.CADConstraints.drawMarks(this, app);
 
     // 工具预览
     if (app.tool && app.tool.onRender) {
@@ -172,7 +185,34 @@
       if (ent.type === 'circle') ctx.closePath();
       return true;
     }
+    if (ent.type === 'rect') {
+      const a = this.screen({ x: ent.x1, y: ent.y2 });
+      const b = this.screen({ x: ent.x2, y: ent.y1 });
+      ctx.rect(a.x, a.y, b.x - a.x, b.y - a.y);
+      return true;
+    }
+    if (ent.type === 'poly') {
+      const pts = ent.pts || [];
+      if (pts.length < 2) return false;
+      pts.forEach(function (q, i) {
+        const s = this.screen(q);
+        if (i === 0) ctx.moveTo(s.x, s.y); else ctx.lineTo(s.x, s.y);
+      }, this);
+      if (ent.closed !== false) ctx.closePath();
+      return true;
+    }
     return false;
+  };
+
+  Renderer.prototype.fillEntity = function (ent) {
+    if (!ent.fill || ent.fill === 'none') return;
+    const color = FILLS[ent.fill];
+    if (!color) return;
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.restore();
   };
 
   Renderer.prototype.strokeEntity = function (ent, color, width, glow) {
@@ -194,15 +234,31 @@
       return;
     }
     if (!this.pathEntity(ent)) return;
+    if (ent.type === 'rect' || ent.type === 'poly') this.fillEntity(ent);
     ctx.save();
     ctx.strokeStyle = color;
     ctx.lineWidth = width;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
+    if (ent.style === 'dashed') ctx.setLineDash([8, 6]);
     if (glow) {
       ctx.shadowColor = color;
       ctx.shadowBlur = 7;
     }
+    ctx.stroke();
+    ctx.restore();
+  };
+
+  /** 工具预览：保留填充与边框样式，但用预览色虚线显示 */
+  Renderer.prototype.previewEntity = function (ent) {
+    if (!this.pathEntity(ent)) return;
+    const ctx = this.ctx;
+    if (ent.type === 'rect' || ent.type === 'poly') this.fillEntity(ent);
+    ctx.save();
+    ctx.strokeStyle = COLORS.preview;
+    ctx.lineWidth = 1.6;
+    ctx.lineJoin = 'round';
+    ctx.setLineDash(ent.style === 'dashed' ? [8, 6] : [6, 5]);
     ctx.stroke();
     ctx.restore();
   };
@@ -332,20 +388,24 @@
     ctx.restore();
   };
 
-  Renderer.prototype.label = function (text, screenPt, color) {
+  Renderer.prototype.label = function (text, screenPt, color, opts) {
+    opts = opts || {};
     const ctx = this.ctx;
+    const size = opts.size > 0 ? opts.size : 11;
+    const font = opts.font || '-apple-system, "PingFang SC", system-ui, sans-serif';
     ctx.save();
-    ctx.font = '11px -apple-system, "PingFang SC", system-ui, sans-serif';
+    ctx.font = size + 'px ' + font;
     const w = ctx.measureText(text).width;
     ctx.fillStyle = 'rgba(13, 17, 23, 0.82)';
     ctx.strokeStyle = 'rgba(42, 52, 65, 0.9)';
     ctx.lineWidth = 1;
     const x = screenPt.x, y = screenPt.y;
+    const h = size + 7;
     ctx.beginPath();
     if (ctx.roundRect) {
-      ctx.roundRect(x - 4, y - 13, w + 10, 18, 5);
+      ctx.roundRect(x - 4, y - size - 2, w + 10, h, 5);
     } else {
-      ctx.rect(x - 4, y - 13, w + 10, 18);
+      ctx.rect(x - 4, y - size - 2, w + 10, h);
     }
     ctx.fill();
     ctx.stroke();
