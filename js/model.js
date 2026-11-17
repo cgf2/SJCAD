@@ -1,4 +1,4 @@
-/* 手机CAD · 文档模型（图元集合、拾取、框选、链拾取） */
+/* 手机CAD · 文档模型（图元集合、拾取、框选、关联选择链识别） */
 (function (global) {
   'use strict';
   const Geo = global.Geo;
@@ -136,7 +136,7 @@
     });
   };
 
-  /** 链拾取：从 start 出发，识别端点相连的连续图元 */
+  /** 关联选择：从 start 出发，识别端点相连的连续图元 */
   Doc.prototype.chain = function (start, tol) {
     tol = tol || 1e-6;
     const chosen = new Set([start.id]);

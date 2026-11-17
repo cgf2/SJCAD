@@ -208,7 +208,7 @@
           }
         },
         {
-          name: '链拾取识别连续相连图元',
+          name: '关联选择链识别连续相连图元',
           run: function () {
             const d = docWith([
               line(0, 0, 10, 0),
@@ -544,9 +544,236 @@
           }
         },
         {
+          name: '中心线工具：点划线样式与两端延伸',
+          run: function () {
+            const app = mockApp();
+            app.params.cext = 6;
+            const t = useTool('center');
+            t.onTap({ x: 0, y: 0 });
+            t.onTap({ x: 100, y: 0 });
+            assert(app.model.count() === 1, '应生成一条中心线');
+            const e = app.model.entities[0];
+            assert(e.type === 'line' && e.style === 'center', '中心线应为点划线样式');
+            near(e.p1.x, -6, 1e-9, '起点应向外延伸');
+            near(e.p2.x, 106, 1e-9, '终点应向外延伸');
+            near(Geo.entityLength(e), 112, 1e-9, '延伸后总长度');
+            assert(t.points.length === 0, '完成后应重置状态');
+            const t2 = useTool('center');
+            t2.onTap({ x: 10, y: 10 });
+            t2.onTap({ x: 10, y: 10 });
+            assert(app.model.count() === 1, '起点终点重合不应生成中心线');
+            app.params.cext = 0;
+            const t3 = useTool('center');
+            t3.onTap({ x: 0, y: 50 });
+            t3.onTap({ x: 0, y: 150 });
+            near(app.model.entities[1].p1.y, 50, 1e-9, '延伸长度为 0 时端点不偏移');
+            near(app.model.entities[1].p2.y, 150, 1e-9, '延伸长度为 0 时端点不偏移');
+          }
+        },
+        {
+          name: '中心线：点圆自动生成十字中心线',
+          run: function () {
+            const app = mockApp();
+            app.model.add(circle(50, 60, 20));
+            app.params.cext = 5;
+            const t = useTool('center');
+            t.onTap({ x: 50, y: 60 });
+            assert(app.model.count() === 3, '应生成 2 条过圆心的十字中心线');
+            const h = app.model.entities[1];
+            const v = app.model.entities[2];
+            assert(h.style === 'center' && v.style === 'center', '十字线应为点划线样式');
+            near(h.p1.y, 60, 1e-9);
+            near(h.p2.y, 60, 1e-9);
+            near(h.p1.x, 25, 1e-9, '水平中心线左端按半径 + 延伸');
+            near(h.p2.x, 75, 1e-9, '水平中心线右端按半径 + 延伸');
+            near(v.p1.x, 50, 1e-9);
+            near(v.p2.x, 50, 1e-9);
+            near(v.p1.y, 35, 1e-9, '垂直中心线下端按半径 + 延伸');
+            near(v.p2.y, 85, 1e-9, '垂直中心线上端按半径 + 延伸');
+            assert(app.toasts.join().indexOf('水平') >= 0, '应提示已生成十字中心线');
+          }
+        },
+        {
+          name: '中心线：两条平行线生成等距中线',
+          run: function () {
+            const app = mockApp();
+            app.model.add(line(0, 0, 100, 0));
+            app.model.add(line(0, 40, 100, 40));
+            app.params.cext = 6;
+            const t = useTool('center');
+            t.onTap({ x: 50, y: 0 });
+            t.onTap({ x: 50, y: 40 });
+            assert(app.model.count() === 3, '应生成 1 条等距中线');
+            const m = app.model.entities[2];
+            assert(m.style === 'center', '中线应为点划线样式');
+            near(m.p1.y, 20, 1e-9, '中线位于两条直线正中间');
+            near(m.p2.y, 20, 1e-9);
+            near(m.p1.x, -6, 1e-9, '两端按延伸长度外扩');
+            near(m.p2.x, 106, 1e-9);
+            assert(t.picks.length === 0, '生成后应重置选择状态');
+          }
+        },
+        {
+          name: '中心线：两条不平行线生成角平分线',
+          run: function () {
+            const app = mockApp();
+            app.model.add(line(0, 0, 100, 0));
+            app.model.add(line(50, -50, 50, 50));
+            app.params.cext = 0;
+            const t = useTool('center');
+            t.onTap({ x: 20, y: 0 });
+            t.onTap({ x: 50, y: 30 });
+            assert(app.model.count() === 3, '应生成 1 条角平分线');
+            const b = app.model.entities[2];
+            near((b.p1.x + b.p2.x) / 2, 50, 1e-9, '角平分线以交点为中点');
+            near((b.p1.y + b.p2.y) / 2, 0, 1e-9);
+            const ang = Geo.deg(Math.atan2(b.p2.y - b.p1.y, b.p2.x - b.p1.x));
+            near(Math.abs(ang), 45, 1e-6, '角平分线方向应为 45°');
+            near(Geo.entityLength(b), 100, 1e-6, '长度覆盖两线端点范围');
+          }
+        },
+        {
+          name: '中心线：共线直线给出明确提示',
+          run: function () {
+            const app = mockApp();
+            app.model.add(line(0, 0, 100, 0));
+            app.model.add(line(100, 0, 200, 0));
+            const t = useTool('center');
+            t.onTap({ x: 20, y: 0 });
+            t.onTap({ x: 180, y: 0 });
+            assert(app.model.count() === 2, '共线直线不应生成中心线');
+            assert(app.toasts.join().indexOf('重合') >= 0, '应提示两条直线重合');
+          }
+        },
+        {
+          name: '角度线：长度输入默认关闭与默认参考方向',
+          run: function () {
+            const app = mockApp();
+            const t = useTool('angle');
+            const fields = t.params();
+            const lmod = fields.filter(function (f) { return f.key === 'lmod'; })[0];
+            const len = fields.filter(function (f) { return f.key === 'len'; })[0];
+            const aref = fields.filter(function (f) { return f.key === 'aref'; })[0];
+            const lref = fields.filter(function (f) { return f.key === 'lref'; })[0];
+            assert(lmod && lmod.type === 'toggle' && lmod.def === false, '长度输入应默认关闭');
+            assert(len && !len.when({ lmod: false }) && len.when({ lmod: true }), '长度项应随长度输入开关显示');
+            assert(aref && aref.type === 'choice' && aref.def === 'x', '参考方向默认与 X 轴形成角度');
+            assert(aref.options.length === 2 && aref.options[0].v === 'x' && aref.options[1].v === 'y', '参考方向含 X / Y 两个固定选项');
+            assert(lref && lref.type === 'toggle' && lref.def === false, '与指定线形成角度默认关闭');
+            assert(!aref.when({ lref: true }), '启用指定线参考时应隐藏固定方向选项');
+            app.params.ang = 45;
+            app.params.aref = 'x';
+            t.onTap({ x: 0, y: 0 });
+            t.onTap({ x: 50, y: -50 });
+            const e = app.model.entities[0];
+            assert(!!e, '应生成角度线');
+            near(Geo.entityLength(e), Math.hypot(50, 50), 1e-9, '长度输入关闭时按鼠标点距离生成');
+            const ang = Geo.deg(Math.atan2(e.p2.y - e.p1.y, e.p2.x - e.p1.x));
+            near(ang, -45, 1e-9, '方向贴合鼠标所在侧');
+          }
+        },
+        {
+          name: '角度线：与 Y 轴形成角度',
+          run: function () {
+            const app = mockApp();
+            app.params.aref = 'y';
+            app.params.ang = 10;
+            const t = useTool('angle');
+            t.onTap({ x: 0, y: 0 });
+            t.onTap({ x: 5, y: 100 });
+            const e = app.model.entities[0];
+            const ang = Geo.deg(Math.atan2(e.p2.y - e.p1.y, e.p2.x - e.p1.x));
+            near(ang, 80, 1e-6, 'Y 轴参考：与 Y 轴夹角 10° 且贴合鼠标侧');
+            near(Geo.entityLength(e), Math.hypot(5, 100), 1e-9, '长度输入关闭时按鼠标点距离生成');
+          }
+        },
+        {
+          name: '角度线：与指定线形成角度',
+          run: function () {
+            const app = mockApp();
+            app.model.add(line(0, 0, 100, 0));
+            app.params.lref = true;
+            app.params.ang = 30;
+            const t = useTool('angle');
+            t.onTap({ x: 20, y: 0 });
+            assert(t.refId === app.model.entities[0].id, '应记录参考直线');
+            assert(app.model.selected.size === 1, '参考直线应高亮选中');
+            t.onTap({ x: 0, y: 50 });
+            t.onTap({ x: 100, y: -34 });
+            const e = app.model.entities[1];
+            const ang = Geo.deg(Math.atan2(e.p2.y - e.p1.y, e.p2.x - e.p1.x));
+            near(ang, -30, 1e-6, '相对所选直线形成 30° 且贴合鼠标侧');
+          }
+        },
+        {
+          name: '角度线：缺少参考直线时提示',
+          run: function () {
+            const app = mockApp();
+            app.params.lref = true;
+            const t = useTool('angle');
+            t.onTap({ x: 0, y: 0 });
+            assert(app.model.count() === 0, '未选参考线不应建线');
+            assert(app.toasts.join().indexOf('角度参考') >= 0, '应提示先选参考直线');
+          }
+        },
+        {
+          name: '角度线：长度输入开启后按输入长度生成',
+          run: function () {
+            const app = mockApp();
+            app.params.lmod = true;
+            app.params.len = 50;
+            app.params.ang = 45;
+            const t = useTool('angle');
+            t.onTap({ x: 0, y: 0 });
+            t.onTap({ x: 70, y: -100 });
+            const e = app.model.entities[0];
+            near(Geo.entityLength(e), 50, 1e-9, '按输入长度生成');
+            const ang = Geo.deg(Math.atan2(e.p2.y - e.p1.y, e.p2.x - e.p1.x));
+            near(ang, -45, 1e-6, '方向贴合鼠标下方');
+            near(e.p2.x, Math.cos(-Math.PI / 4) * 50, 1e-9);
+          }
+        },
+        {
+          name: '角度线：无方向点时确定给出提示',
+          run: function () {
+            const app = mockApp();
+            const t = useTool('angle');
+            t.onTap({ x: 0, y: 0 });
+            t.hover = null;
+            t.applyParams();
+            assert(app.model.count() === 0, '未提供方向点不应建线');
+            assert(app.toasts.join().indexOf('方向点') >= 0, '应提示点按方向点');
+          }
+        },
+        {
+          name: '直线工具：坐标输入默认关闭',
+          run: function () {
+            const app = mockApp();
+            const t = useTool('line');
+            const fields = t.params();
+            const coord = fields.filter(function (f) { return f.key === 'coord'; })[0];
+            assert(coord && coord.type === 'toggle' && coord.def === false, '坐标输入应默认关闭');
+            ['x1', 'y1', 'x2', 'y2'].forEach(function (k) {
+              const f = fields.filter(function (fd) { return fd.key === k; })[0];
+              assert(f && typeof f.when === 'function', '坐标项应带显示条件');
+              assert(!f.when({ coord: false }), k + ' 默认（未勾选）应隐藏');
+              assert(f.when({ coord: true }), k + ' 勾选后应显示');
+            });
+            t.applyParams();
+            assert(app.model.count() === 0, '未勾选坐标输入时不应建图形');
+            assert(app.toasts.join().indexOf('坐标输入') >= 0, '应提示先勾选坐标输入');
+            app.params.coord = true;
+            app.params.x1 = 0; app.params.y1 = 0;
+            app.params.x2 = 50; app.params.y2 = 0;
+            t.applyParams();
+            assert(app.model.count() === 1, '勾选后应能按坐标建线');
+          }
+        },
+        {
           name: '直线工具：坐标输入精确生成',
           run: function () {
             const app = mockApp();
+            app.params.coord = true;
             app.params.x1 = 10; app.params.y1 = 10;
             app.params.x2 = 10; app.params.y2 = 110;
             const t = useTool('line');
@@ -695,6 +922,7 @@
             near(app.model.entities[1].p2.x, 0, 1e-9, '垂直锁定');
             near(app.model.entities[1].p2.y, 100, 1e-9);
 
+            app.params.coord = true;
             app.params.x1 = 0; app.params.y1 = 0;
             app.params.x2 = 100; app.params.y2 = 10;
             t.applyParams();
@@ -1045,28 +1273,29 @@
           }
         },
         {
-          name: '镜像：指定轴生成对称副本',
+          name: '镜像：点选轴线生成对称副本',
           run: function () {
             const app = mockApp();
             app.model.add(line(10, 10, 30, 10));
             app.model.add(circle(20, 30, 5));
             app.model.add(arc(20, 50, 10, 0, Math.PI / 2, true));
-            app.model.entities.forEach(function (e) { app.model.selected.add(e.id); });
-            app.params.x1 = 0; app.params.y1 = 0;
-            app.params.x2 = 0; app.params.y2 = 100;
+            app.model.add(line(0, 0, 0, 100));
+            app.model.entities.slice(0, 3).forEach(function (e) { app.model.selected.add(e.id); });
             const t = useTool('mirror');
-            t.applyParams();
-            assert(app.model.count() === 6, '应生成 3 个镜像副本并保留原图');
-            const ml = app.model.entities[3];
+            assert(t.params().length === 0, '镜像工具不应再提供手动输入镜像轴参数');
+            assert(typeof t.applyParams !== 'function', '镜像工具不应再提供“确定”入口');
+            t.onTap({ x: 0, y: 50 });
+            assert(app.model.count() === 7, '点选轴线后应生成 3 个镜像副本并保留原图');
+            const ml = app.model.entities[4];
             near(ml.p1.x, -10, 1e-9, '直线端点镜像 X');
             near(ml.p1.y, 10, 1e-9);
             near(ml.p2.x, -30, 1e-9);
-            const mc = app.model.entities[4];
+            const mc = app.model.entities[5];
             assert(mc.type === 'circle');
             near(mc.c.x, -20, 1e-9);
             near(mc.c.y, 30, 1e-9);
             near(mc.r, 5, 1e-9);
-            const ma = app.model.entities[5];
+            const ma = app.model.entities[6];
             assert(ma.type === 'arc');
             near(ma.c.x, -20, 1e-9);
             near(Geo.arcSweep(ma), Math.PI / 2, 1e-6, '镜像后扫掠角不变');
@@ -1075,16 +1304,15 @@
             near(mid.x, -20 - 10 * Math.cos(Math.PI / 4), 1e-6, '圆弧镜像到轴线另一侧');
 
             assert(app.model.selected.size === 0, '生成后清空选择');
-            t.applyParams();
-            assert(app.model.count() === 6, '未选中时不应再生成');
+            t.onTap({ x: 0, y: 50 });
+            assert(app.model.count() === 7, '未选中时点按轴线不应再生成');
 
             const app2 = mockApp();
             app2.model.add(circle(0, 0, 5));
+            app2.model.add(line(0, 0, 0, 100));
             app2.model.selected.add(app2.model.entities[0].id);
-            app2.params.x1 = 0; app2.params.y1 = 0;
-            app2.params.x2 = 0; app2.params.y2 = 100;
-            useTool('mirror').applyParams();
-            assert(app2.model.count() === 1, '与已有图形重合的镜像应跳过');
+            useTool('mirror').onTap({ x: 0, y: 50 });
+            assert(app2.model.count() === 2, '与已有图形重合的镜像应跳过');
           }
         },
         {
@@ -1112,6 +1340,7 @@
             const app = mockApp();
             app.model.add(line(0, 0, 10, 0));
             app.model.selected.add(app.model.entities[0].id);
+            app.params.amode = 'rect';
             app.params.rows = 2;
             app.params.cols = 3;
             app.params.rgap = 50;
@@ -1138,6 +1367,8 @@
           name: '阵列：环形数量与角度',
           run: function () {
             const app = mockApp();
+            const tDefault = useTool('array');
+            assert(tDefault._polar() === true, '阵列默认使用环形阵型');
             app.model.add({ type: 'point', p: { x: 20, y: 0 } });
             app.model.add({ type: 'point', p: { x: -20, y: 0 } });
             app.model.entities.forEach(function (e) { app.model.selected.add(e.id); });
@@ -1173,7 +1404,6 @@
             app2.params.amode = 'polar';
             app2.params.pcount = 4;
             app2.params.pangle = 360;
-            app2.params.pcenter = true;
             app2.params.pcx = 0;
             app2.params.pcy = 0;
             const t2 = useTool('array');
@@ -1183,12 +1413,21 @@
               return e.type === 'point' && Math.abs(e.p.x + 10) < 1e-6 && Math.abs(e.p.y - 20) < 1e-6;
             }), '绕指定圆心旋转 90°');
 
-            // 空白处点按拾取圆心
+            // 空白处点按：指定圆心并立即生成阵列
             app2.model.selected.add(app2.model.entities[0].id);
+            const before = app2.model.count();
             t2.onTap({ x: 0, y: 0 });
             near(Number(app2.params.pcx), 0, 1e-9);
             near(Number(app2.params.pcy), 0, 1e-9, '点按空白设置圆心');
-            assert(app2.model.selected.size === 1, '拾取圆心不应清除对象选择');
+            assert(app2.model.count() === before + 3, '点按圆心应立即生成 3 个环形副本');
+            assert(app2.model.selected.size === 0, '生成后清空选择');
+            assert(app2.toasts.join().indexOf('环形阵列副本') >= 0, '应提示已生成环形副本');
+
+            // 未选择对象时点按圆心只提示，不生成
+            const before2 = app2.model.count();
+            t2.onTap({ x: 30, y: 30 });
+            assert(app2.model.count() === before2, '未选择对象时点按不应生成');
+            assert(app2.toasts[app2.toasts.length - 1].indexOf('请先') >= 0, '应提示先选择对象');
           }
         },
         {
@@ -1350,17 +1589,18 @@
           }
         },
         {
-          name: '链拾取工具',
+          name: '关联选择：链拾取模块已移除且功能不丢失',
           run: function () {
+            assert(!global.CADTools.byId('chain'), '链拾取工具应已移除');
             const app = mockApp();
             app.model.add(line(0, 0, 10, 0));
             app.model.add(line(10, 0, 10, 10));
             app.model.add(line(10, 10, 20, 10));
             app.model.add(line(100, 100, 110, 100));
-            const t = useTool('chain');
+            app.params.chain = true;
+            const t = useTool('select');
             t.onTap({ x: 5, y: 0 });
-            assert(app.model.selected.size === 3, '应选中 3 条相连线段');
-            assert(lastInfo(app).html.indexOf('3 个图元') >= 0, '面板应显示链数量');
+            assert(app.model.selected.size === 3, '关联选择应选中 3 条相连线段');
           }
         },
         {
@@ -1825,7 +2065,109 @@
             d.restoreSnapshot(snap);
             near(d.dims[0].param, 100, 1e-9, '快照恢复显示位置');
             near(d.dims[0].style.size, 18, 1e-9, '快照恢复样式');
-            assert(!D.setValue(d, d.dims[0], 30, false).ok, '平行距离为测量值，不支持尺寸驱动');
+            // 尺寸驱动：修改距离值 -> 第一条线不动，第二条线沿法线平移
+            assert(!D.setValue(d, d.dims[0], 0, false).ok, '距离 0 应被拒绝');
+            assert(!D.setValue(d, d.dims[0], -5, false).ok, '负距离应被拒绝');
+            assert(D.setValue(d, d.dims[0], 30, true).ok, 'dryRun 应通过校验');
+            near(D.parallelGeomFor(d, d.dims[0]).d, 20, 1e-9, 'dryRun 不应改变图形');
+            assert(D.setValue(d, d.dims[0], 30, false).ok, '平行距离应支持尺寸驱动');
+            near(D.parallelGeomFor(d, d.dims[0]).d, 30, 1e-9, '驱动后距离精确为输入值');
+            const A2 = d.findById(A.id), B2 = d.findById(B.id);
+            near(A2.p1.y, 0, 1e-9, '第一条线保持不动');
+            near(A2.p2.y, 0, 1e-9, '第一条线保持不动');
+            near(B2.p1.y, 30, 1e-9, '第二条线沿法线平移');
+            near(B2.p2.y, 30, 1e-9, '第二条线整体平移');
+            near(D.valueOf(d, d.dims[0]), 30, 1e-9, '标注数值同步更新');
+            assert(/data-dim="/.test(D.infoHtml(d, d.dims[0])), '面板应提供距离修改输入');
+          }
+        },
+        {
+          name: '智能标注自动判断：单线选中、二次选择距离 / 角度、仅数值弹框',
+          run: function () {
+            const D = global.CADDims;
+
+            // 1) 单条直线：只选中，不创建标注、不弹信息框
+            let app = mockApp();
+            app.model.add(line(0, 0, 100, 0));
+            app.model.add(line(0, 20, 100, 20));
+            let t = useTool('dim');
+            t.onTap({ x: 50, y: 0 });
+            assert(app.model.dims.length === 0, '点选单条直线不应创建标注');
+            assert(app.dimId === undefined, '点选单条直线不应弹出标注信息框');
+            assert(t.picks.length === 1, '点选单条直线应进入选中状态');
+
+            // 2) 再点另一条平行直线：自动生成平行距离标注
+            t.onTap({ x: 50, y: 20 });
+            assert(app.model.dims.length === 1, '两条平行直线应自动生成一条标注');
+            assert(app.model.dims[0].kind === 'pdist', '平行时应生成平行距离标注');
+            near(D.valueOf(app.model, app.model.dims[0]), 20, 1e-9, '自动平行距离数值');
+            assert(app.dimId === undefined, '自动生成标注时不应弹出信息框');
+
+            // 3) 不平行的两条直线：自动生成夹角标注
+            app = mockApp();
+            app.model.add(line(0, 0, 100, 0));
+            app.model.add(line(0, 0, 0, 100));
+            t = useTool('dim');
+            t.onTap({ x: 50, y: 0 });
+            t.onTap({ x: 0, y: 50 });
+            assert(app.model.dims.length === 1 && app.model.dims[0].kind === 'angle', '不平行时应生成角度标注');
+            near(D.valueOf(app.model, app.model.dims[0]), 90, 1e-6, '自动角度数值');
+            assert(app.dimId === undefined, '角度标注不应自动弹框');
+
+            // 4) 已选一条直线后点按空白：为该直线创建线性标注
+            app = mockApp();
+            app.model.add(line(0, 0, 100, 0));
+            t = useTool('dim');
+            t.onTap({ x: 50, y: 0 });
+            t.onTap({ x: 500, y: 500 });
+            assert(app.model.dims.length === 1 && app.model.dims[0].kind === 'length', '空白点按应创建线性标注');
+            assert(app.model.dims[0].entId === app.model.entities[0].id, '线性标注应关联所选直线');
+            assert(app.dimId === undefined, '线性标注不应自动弹框');
+
+            // 5) 圆 / 圆弧：直接创建直径 / 半径标注，且不弹框
+            app = mockApp();
+            app.model.add(circle(0, 0, 50));
+            t = useTool('dim');
+            t.onTap({ x: 50, y: 0 });
+            assert(app.model.dims.length === 1 && app.model.dims[0].kind === 'diameter', '点按圆应生成直径标注');
+            assert(app.dimId === undefined, '直径标注不应自动弹框');
+            t.onTap({ x: 50, y: 0 });
+            assert(app.model.dims.length === 1, '重复点按不应重复创建标注');
+
+            app = mockApp();
+            app.model.add(arc(0, 0, 30, 0, Math.PI / 2, true));
+            t = useTool('dim');
+            t.onTap({ x: 30 * Math.SQRT1_2, y: 30 * Math.SQRT1_2 });
+            assert(app.model.dims.length === 1 && app.model.dims[0].kind === 'radius', '点按圆弧应生成半径标注');
+            assert(app.dimId === undefined, '半径标注不应自动弹框');
+
+            // 6) 数值文本命中：仅点中数值矩形才返回该标注
+            const noop = function () {};
+            const ctx = {
+              save: noop, restore: noop, beginPath: noop, closePath: noop,
+              moveTo: noop, lineTo: noop, stroke: noop, fill: noop, fillText: noop,
+              setLineDash: noop, translate: noop, rotate: noop,
+              measureText: function (s) { return { width: String(s).length * 7 }; },
+              fillStyle: '', strokeStyle: '', lineWidth: 1, font: '', textAlign: '', textBaseline: ''
+            };
+            const R = {
+              ctx: ctx,
+              screen: function (p) { return { x: p.x * 10 + 100, y: p.y * 10 + 100 }; },
+              label: noop
+            };
+            const d = docWith([line(0, 0, 100, 0)]);
+            const dim = d.addDim({ kind: 'length', entId: d.entities[0].id, offset: 2 });
+            const app2 = { model: d, view: { scale: 10 }, params: { dshow: true, dortho: false }, renderer: R };
+            D.draw(R, app2);
+            const li = D.labelInfo(dim.id);
+            assert(D.hitLabel(app2, { x: li.x + 5, y: li.y - 5 }, 4) === dim, '数值矩形内应命中');
+            assert(D.hitLabel(app2, { x: li.x, y: li.y + 40 }, 4) === null, '数值矩形外不应命中');
+            // 标注线命中但数值不命中：点按标注线不弹信息框
+            assert(D.hitLine(app2, { x: 588, y: 121 }, 4) === dim, '标注线应命中');
+            assert(D.hitLabel(app2, { x: 588, y: 121 }, 4) === null, '点在标注线上不应命中数值');
+            app2.params.dshow = false;
+            D.draw(R, app2);
+            assert(D.hitLabel(app2, { x: li.x + 5, y: li.y - 5 }, 4) === null, '隐藏标注时不可命中数值');
           }
         },
         {
@@ -2108,6 +2450,67 @@
             assert(app4.model.constraints[0].type === 'onLine', '点在线上工具应添加约束');
             near(app4.model.entities[0].c.y, 0, 1e-9, '圆心应立即投影到直线');
           }
+        },
+        {
+          name: '固定工具：仅固定端点开关',
+          run: function () {
+            const app = mockApp();
+            app.model.add(circle(0, 0, 20));
+            const tf = useTool('cfix');
+            const f = tf.params().filter(function (fd) { return fd.key === 'fonly'; })[0];
+            assert(f && f.type === 'toggle' && f.def === false, '固定工具应提供“仅固定端点”开关且默认关闭');
+            app.params.fonly = true;
+            tf.onTap({ x: 20, y: 0 });
+            assert(app.model.constraints[0].type === 'fixed', '应添加固定约束');
+            assert(app.model.constraints[0].onlyEndpoints === true, '开启后应提交仅固定端点');
+            assert(app.toasts.join().indexOf('端点') >= 0, '应提示仅固定端点');
+          }
+        },
+        {
+          name: '固定约束：仅固定端点的求解行为',
+          run: function () {
+            const C = global.CADConstraints;
+            // 圆：仅固定圆心，半径可随其他约束变化
+            const d = docWith([circle(0, 0, 100), circle(0, 200, 50)]);
+            d.addConstraint({ type: 'fixed', ids: [d.entities[1].id], onlyEndpoints: true });
+            d.addConstraint({ type: 'overlap', ids: [d.entities[0].id, d.entities[1].id] });
+            C.solve(d);
+            const cb = d.entities[1];
+            near(cb.c.x, 0, 1e-9, '仅固定端点：圆心 X 保持');
+            near(cb.c.y, 200, 1e-9, '仅固定端点：圆心 Y 保持');
+            near(cb.r, 100, 1e-9, '仅固定端点：半径可被其他约束改变');
+
+            // 完整固定：圆心与半径均不变
+            const d2 = docWith([circle(0, 0, 100), circle(0, 200, 50)]);
+            d2.addConstraint({ type: 'fixed', ids: [d2.entities[1].id] });
+            d2.addConstraint({ type: 'overlap', ids: [d2.entities[0].id, d2.entities[1].id] });
+            C.solve(d2);
+            near(d2.entities[1].c.y, 200, 1e-9, '完整固定：圆心保持');
+            near(d2.entities[1].r, 50, 1e-9, '完整固定：半径保持');
+
+            // 直线：仅固定端点时端点不参与移动
+            const d3 = docWith([{ type: 'point', p: { x: 50, y: 100 } }, line(0, 0, 100, 0)]);
+            d3.addConstraint({ type: 'fixed', ids: [d3.entities[1].id], onlyEndpoints: true });
+            d3.addConstraint({ type: 'distance', ids: [d3.entities[0].id, d3.entities[1].id], value: 200 });
+            C.solve(d3);
+            near(d3.entities[1].p1.x, 0, 1e-9, '直线起点 X 保持');
+            near(d3.entities[1].p1.y, 0, 1e-9, '直线起点 Y 保持');
+            near(d3.entities[1].p2.x, 100, 1e-9, '直线终点 X 保持');
+            near(d3.entities[1].p2.y, 0, 1e-9, '直线终点 Y 保持');
+
+            // 圆弧：仅固定端点，半径保持、圆心反解
+            const d4 = docWith([arc(0, 0, 30, 0, Math.PI / 2, true), line(-100, 50, 100, 50)]);
+            d4.addConstraint({ type: 'fixed', ids: [d4.entities[0].id], onlyEndpoints: true });
+            d4.addConstraint({ type: 'tangent', ids: [d4.entities[0].id, d4.entities[1].id] });
+            C.solve(d4);
+            const a4 = d4.entities[0];
+            assert(d4.constraints[0].onlyEndpoints === true, '约束应记录仅固定端点');
+            near(a4.r, 30, 1e-9, '仅固定端点：圆弧半径保持');
+            near(Geo.dist(Geo.arcStart(a4), { x: 30, y: 0 }), 0, 1e-6, '圆弧起点保持');
+            near(Geo.dist(Geo.arcEnd(a4), { x: 0, y: 30 }), 0, 1e-6, '圆弧终点保持');
+            near(a4.c.x, 0, 1e-6, '圆心按端点反解');
+            near(a4.c.y, 0, 1e-6);
+          }
         }
       ]
     },
@@ -2349,7 +2752,7 @@
             const c = added[0];
             assert(c.type === 'coincident' && d.constraints[0] === c, '约束应写入模型');
             assert(c.aIdx === 1 && c.bIdx === 0, '应连接第一条终点与第二条起点');
-            assert(C.nameOf('coincident') === '端点重合', '约束名称应为端点重合');
+            assert(C.nameOf('coincident') === '重合', '约束名称应为重合');
             assert(C.iconOf('coincident') === '⊙', '约束标记应为 ⊙');
 
             assert(C.autoDetectEndpoints(d, 3).length === 0, '重复检测不应叠加约束');
@@ -2383,6 +2786,37 @@
 
             const d4 = docWith([circle(0, 0, 10), line(9, 0, 100, 0)]);
             assert(C.autoDetectEndpoints(d4, 2).length === 0, '圆没有端点，不参与检测');
+          }
+        },
+        {
+          name: '手动重合约束工具：最近端点自动重合与重复校验',
+          run: function () {
+            const app = mockApp();
+            const a = app.model.add(line(0, 0, 100, 0));
+            const b = app.model.add(line(120, 70, 180, 70));
+            const t = useTool('ccoin');
+            t.onTap({ x: 50, y: 0 });
+            t.onTap({ x: 150, y: 70 });
+            assert(app.model.constraints.length === 1, '应添加重合约束');
+            const c = app.model.constraints[0];
+            assert(c.type === 'coincident' && c.aIdx === 1 && c.bIdx === 0, '应取最近的一对端点');
+            near(b.p1.x, 100, 1e-9, '第二条线起点应平移到重合位置');
+            near(b.p1.y, 0, 1e-9, '第二条线起点应平移到重合位置');
+            near(b.p2.x, 160, 1e-9, '第二条线整体平移');
+            near(Geo.dist(a.p2, b.p1), 0, 1e-9, '端点应精确重合');
+
+            const t2 = useTool('ccoin');
+            t2.onTap({ x: 50, y: 0 });
+            t2.onTap({ x: 140, y: 0 });
+            assert(app.model.constraints.length === 1, '重复添加不应叠加约束');
+            assert(t2.picks.length === 0, '重复添加后应重置选择');
+
+            const app2 = mockApp();
+            app2.model.add(circle(0, 0, 20));
+            app2.model.add(line(0, 0, 50, 0));
+            const t3 = useTool('ccoin');
+            t3.onTap({ x: 20, y: 0 });
+            assert(app2.model.constraints.length === 0, '圆没有端点，不应建立重合约束');
           }
         },
         {
@@ -2564,7 +2998,7 @@
           }
         },
         {
-          name: '100 段链拾取耗时',
+          name: '100 段关联选择链识别耗时',
           run: function () {
             const d = new Doc();
             for (let i = 0; i < 100; i++) d.add(line(i * 10, 0, (i + 1) * 10, 0));
@@ -2572,7 +3006,7 @@
             const set = d.chain(d.entities[50], 1e-6);
             const ms = performance.now() - t0;
             assert(set.size === 100, '应识别全部 100 段');
-            assert(ms < 100, '链拾取应在 100ms 内完成，实际 ' + ms.toFixed(1) + 'ms');
+            assert(ms < 100, '关联选择链识别应在 100ms 内完成，实际 ' + ms.toFixed(1) + 'ms');
             return ms.toFixed(2) + ' ms / 100 段';
           }
         }

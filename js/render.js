@@ -241,12 +241,28 @@
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     if (ent.style === 'dashed') ctx.setLineDash([8, 6]);
+    else if (ent.style === 'center') ctx.setLineDash([16, 4, 3, 4]);
     if (glow) {
       ctx.shadowColor = color;
       ctx.shadowBlur = 7;
     }
     ctx.stroke();
     ctx.restore();
+    // 圆心标记：小圆点 + 十字，随图元一起绘制（用于初始示例圆）
+    if (ent.type === 'circle' && ent.centerMark) {
+      const p = this.screen(ent.c);
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 2.5, 0, Geo.TAU);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(p.x - 9, p.y); ctx.lineTo(p.x + 9, p.y);
+      ctx.moveTo(p.x, p.y - 9); ctx.lineTo(p.x, p.y + 9);
+      ctx.stroke();
+      ctx.restore();
+    }
   };
 
   /** 工具预览：保留填充与边框样式，但用预览色虚线显示 */
@@ -258,7 +274,7 @@
     ctx.strokeStyle = COLORS.preview;
     ctx.lineWidth = 1.6;
     ctx.lineJoin = 'round';
-    ctx.setLineDash(ent.style === 'dashed' ? [8, 6] : [6, 5]);
+    ctx.setLineDash(ent.style === 'center' ? [16, 4, 3, 4] : ent.style === 'dashed' ? [8, 6] : [6, 5]);
     ctx.stroke();
     ctx.restore();
   };

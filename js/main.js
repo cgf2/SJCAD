@@ -11,6 +11,13 @@
   const $ = function (id) { return document.getElementById(id); };
   const canvas = $('canvas');
 
+  /* 功能扩展开关：关闭时隐藏不常用绘图工具与全部约束功能 */
+  const EXT_KEY = 'cad.ext.enabled';
+  const EXT_HIDE_DRAW = { rect: true, poly: true, arc: true, offset: true };
+  let extEnabled = false;
+  let currentTab = 'edit';
+  try { extEnabled = localStorage.getItem(EXT_KEY) === '1'; } catch (e) { extEnabled = false; }
+
   const App = {
     model: new Doc(),
     view: new View(),
@@ -352,7 +359,9 @@
       box.appendChild(fw);
       row.appendChild(box);
     });
-    if (typeof App.tool.applyParams === 'function') {
+    // 无可见数值项时（如直线关闭“坐标输入”）不显示“确定”，避免用默认值误建图形
+    const hasNumber = fields.some(function (fd) { return !fd.type || fd.type === 'number'; });
+    if (hasNumber && typeof App.tool.applyParams === 'function') {
       const btn = document.createElement('button');
       btn.className = 'param-apply';
       btn.textContent = '确定';
@@ -755,16 +764,10 @@
     App.refresh();
   }
 
-  /* ---------------- 示例图形 ---------------- */
+  /* ---------------- 初始图形 ---------------- */
   function seed() {
-    const ents = [
-      { type: 'line', p1: { x: 0, y: 0 }, p2: { x: 180, y: 0 } },
-      { type: 'line', p1: { x: 180, y: 0 }, p2: { x: 180, y: 110 } },
-      { type: 'line', p1: { x: 0, y: 110 }, p2: { x: 180, y: 110 } },
-      { type: 'circle', c: { x: 90, y: 55 }, r: 28 },
-      { type: 'arc', c: { x: 0, y: 0 }, r: 46, a0: 0, a1: Math.PI / 2, ccw: true }
-    ];
-    ents.forEach(function (e) { App.model.add(e); });
+    // 圆心 (0,0)、直径 100 的圆，带中心十字标记
+    App.model.add({ type: 'circle', c: { x: 0, y: 0 }, r: 50, centerMark: true });
     updateCount();
   }
 
@@ -791,6 +794,14 @@
     if (!D || !D.hitLine) return null;
     if (!App.tool || App.tool.cat !== 'query') return null;
     return D.hitLine(App, sp, 6);
+  }
+
+  /** 查询模块下命中已生成标注的数值文本（仅此项可弹出标注信息框） */
+  function dimLabelAtScreen(sp) {
+    const D = window.CADDims;
+    if (!D || !D.hitLabel) return null;
+    if (!App.tool || App.tool.cat !== 'query') return null;
+    return D.hitLabel(App, sp, 4);
   }
 
   /** 取消标注线拖拽；restore=true 时还原拖动前的偏移 / 锚点与数值位置 */
@@ -884,6 +895,14 @@
       dragging = false;
       previewing = false;
       multi = false;
+      // 数值文本优先：命中后点按弹出标注信息框，不启动标注线拖拽
+      const labelHit = dimLabelAtScreen(sp);
+      if (labelHit) {
+        down.dimLabelId = labelHit.id;
+        App.overlay = null;
+        canvas.style.cursor = 'pointer';
+        return;
+      }
       const dimHit = dimLineAtScreen(sp);
       if (dimHit) {
         App.dimDrag = {
@@ -929,6 +948,16 @@
     const sp = localPoint(e);
     if (!pointers.has(e.pointerId)) {
       if (e.pointerType === 'mouse') {
+        // 悬停数值文本：显示可点击光标
+        const hoverLabel = dimLabelAtScreen(sp);
+        if (hoverLabel) {
+          if (App.dimHoverId !== hoverLabel.id) {
+            App.dimHoverId = hoverLabel.id;
+            App.refresh();
+          }
+          canvas.style.cursor = 'pointer';
+          return;
+        }
         // 查询模块下悬停标注线：加粗高亮并显示可拖拽光标
         const hover = dimLineAtScreen(sp);
         if (hover) {
@@ -1044,7 +1073,6 @@
 
     if (App.dimDrag) {
       const dd = App.dimDrag;
-      const dim = App.model.findDim(dd.id);
       App.dimDrag = null;
       canvas.style.cursor = 'grab';
       if (dd.moved) {
@@ -1054,7 +1082,8 @@
         App.updatePrompt();
       } else {
         if (dd.begun) App.abort();
-        if (dim) App.showDim(dim.id);
+        // 点按标注线只做选中 / 拖拽准备，不弹出标注信息框
+        canvas.style.cursor = 'grab';
       }
       if (pointers.size === 0) { down = null; multi = false; }
       return;
@@ -1087,7 +1116,13 @@
     // 点按
     const isTap = !down.moved && (performance.now() - down.time) < 900 && pointers.size === 0;
     if (isTap && !multi) {
-      handleTap(worldAtScreen(sp), sp);
+      if (down.dimLabelId) {
+        // 仅点击标注数值本身才弹出标注信息框
+        const dim = App.model.findDim(down.dimLabelId);
+        if (dim) App.showDim(dim.id);
+      } else {
+        handleTap(worldAtScreen(sp), sp);
+      }
     }
     if (pointers.size === 0) { down = null; multi = false; }
   }
@@ -1188,7 +1223,11 @@
   }
 
   /* ---------------- 菜单 / 导入导出 ---------------- */
-  function openMenu() { $('menuSheet').classList.remove('hidden'); }
+  function openMenu() {
+    const cb = $('extToggle');
+    if (cb) cb.checked = extEnabled;
+    $('menuSheet').classList.remove('hidden');
+  }
   function closeMenu() { $('menuSheet').classList.add('hidden'); }
 
   function exportJSON() {
@@ -1250,14 +1289,19 @@
     btn.addEventListener('click', function () {
       document.querySelectorAll('#tabs .tab').forEach(function (b) { b.classList.remove('active'); });
       btn.classList.add('active');
-      renderToolRow(btn.dataset.tab);
+      const tab = btn.dataset.tab;
+      currentTab = tab;
+      renderToolRow(tab);
     });
   });
 
   function renderToolRow(tab) {
     const row = $('toolRow');
     row.innerHTML = '';
-    Tools.list.filter(function (t) { return t.cat === tab; }).forEach(function (t) {
+    Tools.list.filter(function (t) {
+      if (t.cat !== tab) return false;
+      return extEnabled || !(t.cat === 'constraint' || (t.cat === 'draw' && EXT_HIDE_DRAW[t.id]));
+    }).forEach(function (t) {
       const b = document.createElement('button');
       b.className = 'tool-chip';
       b.dataset.id = t.id;
@@ -1273,6 +1317,34 @@
       row.appendChild(b);
     });
     updateToolChips();
+  }
+
+  function toolVisible(t) {
+    if (!t) return true;
+    if (extEnabled) return true;
+    return !(t.cat === 'constraint' || (t.cat === 'draw' && EXT_HIDE_DRAW[t.id]));
+  }
+
+  /** 同步功能扩展开关的界面表现；animate=true 时先淡出工具栏再重排，避免布局跳动 */
+  function syncExtUI(animate) {
+    const cb = $('extToggle');
+    if (cb) cb.checked = extEnabled;
+    const tabBtn = document.querySelector('#tabs .tab[data-tab="constraint"]');
+    if (tabBtn) tabBtn.classList.toggle('hidden', !extEnabled);
+    if (!extEnabled && currentTab === 'constraint') {
+      currentTab = 'draw';
+      document.querySelectorAll('#tabs .tab').forEach(function (b) {
+        b.classList.toggle('active', b.dataset.tab === 'draw');
+      });
+    }
+    if (!extEnabled && App.tool && !toolVisible(App.tool)) App.setTool('select');
+    if (!animate) { renderToolRow(currentTab); return; }
+    const dock = $('dock');
+    dock.classList.add('switching');
+    setTimeout(function () {
+      renderToolRow(currentTab);
+      dock.classList.remove('switching');
+    }, 180);
   }
 
   document.querySelectorAll('#viewDock .vbtn[data-view]').forEach(function (btn) {
@@ -1296,6 +1368,13 @@
   $('btnRedo').addEventListener('click', App.redo);
   $('btnScript').addEventListener('click', openScript);
   $('btnMenu').addEventListener('click', openMenu);
+  $('extToggle').addEventListener('change', function () {
+    extEnabled = this.checked;
+    try { localStorage.setItem(EXT_KEY, extEnabled ? '1' : '0'); } catch (e) {}
+    closeMenu();
+    syncExtUI(true);
+    App.toast(extEnabled ? '已开启功能扩展' : '已隐藏不常用功能');
+  });
   $('scriptClose').addEventListener('click', function () { scriptModal.classList.add('hidden'); });
   $('scriptRun').addEventListener('click', runScript);
   $('scriptSample').addEventListener('click', function () { scriptInput.value = window.CADScript.SAMPLE; });
@@ -1416,10 +1495,11 @@
   resize();
   seed();
   // 默认展示编辑页签与选择工具
+  currentTab = 'edit';
   document.querySelectorAll('#tabs .tab').forEach(function (b) {
     b.classList.toggle('active', b.dataset.tab === 'edit');
   });
-  renderToolRow('edit');
+  syncExtUI(false);
   App.setTool('select');
   App.zoomFit();
   updateHistoryUI();

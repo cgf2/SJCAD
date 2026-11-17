@@ -606,6 +606,52 @@ select.prop-input { text-align: left; padding: 0 4px; }
 }
 .sheet-item:active { background: #223042; }
 .sheet-item.danger { color: var(--danger); }
+.sheet-switch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+}
+.switch { position: relative; width: 42px; height: 24px; flex: none; }
+.switch input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.switch-track {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: #232f3d;
+  border: 1px solid var(--border);
+  transition: background .18s, border-color .18s;
+  pointer-events: none;
+}
+.switch-track::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #8fa3b8;
+  transition: transform .18s, background .18s;
+}
+.switch input:checked + .switch-track {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+.switch input:checked + .switch-track::after {
+  transform: translateX(18px);
+  background: var(--accent);
+}
+#dock { transition: opacity .18s ease; }
+#dock.switching { opacity: 0; }
 
 .hidden { display: none !important; }
 

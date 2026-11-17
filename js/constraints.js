@@ -283,10 +283,21 @@
     /** 尺寸驱动：把标注数值写回图元；dryRun=true 只校验 */
     setValue: function (model, dim, raw, dryRun) {
       if (!dim) return { ok: false, error: '标注不存在' };
-      if (dim.kind === 'pdist') return { ok: false, error: '平行距离为测量值，不支持尺寸驱动' };
       if (raw === '' || raw == null) return { ok: false, error: '请输入数值' };
       const v = Number(raw);
       if (!isFinite(v)) return { ok: false, error: '请输入有效数字' };
+      if (dim.kind === 'pdist') {
+        if (!(v > 0)) return { ok: false, error: '距离需大于 0' };
+        const g = parallelGeomFor(model, dim);
+        if (!g) return { ok: false, error: '两条直线不再平行或已被删除' };
+        const delta = (g.dSigned >= 0 ? v : -v) - g.dSigned;
+        if (Math.abs(delta) < 1e-12) return { ok: true };
+        if (dryRun) return { ok: true };
+        // 第一条直线保持不动，沿法线平移第二条直线，使垂直距离精确等于输入值
+        g.b.p1 = { x: g.b.p1.x + g.n.x * delta, y: g.b.p1.y + g.n.y * delta };
+        g.b.p2 = { x: g.b.p2.x + g.n.x * delta, y: g.b.p2.y + g.n.y * delta };
+        return { ok: true };
+      }
       if (dim.kind === 'angle') {
         if (!(v > 0 && v < 180)) return { ok: false, error: '角度需在 0~180° 之间' };
         const g = angleGeomFor(model, dim);
@@ -383,6 +394,7 @@
       const model = app.model;
       if (!model || !model.dims) return;
       for (const k in lineCache) delete lineCache[k];
+      for (const k in labelCache) delete labelCache[k];
       const ortho = !!(app.params && app.params.dortho);
       model.dims.forEach(function (dim) {
         if (dim.kind === 'angle') { drawAngle(R, app, dim); return; }
@@ -420,6 +432,38 @@
         if (d <= tol + 3 && d < bestD) { bestD = d; best = dim; }
       });
       return best;
+    },
+    /** 命中已生成标注的数值文本（信息框只在点中数值本身时弹出） */
+    hitLabel: function (app, pt, tol) {
+      if (!app || !app.model || !app.model.dims) return null;
+      if (app.params && app.params.dshow === false) return null;
+      if (!pt) return null;
+      const t = tol == null ? 4 : tol;
+      const ctx = app.renderer && app.renderer.ctx;
+      for (const id in labelCache) {
+        const c = labelCache[id];
+        const dim = app.model.findDim(id);
+        if (!dim) continue;
+        const st = dimStyle(dim);
+        let w;
+        if (ctx && ctx.measureText) {
+          ctx.save();
+          ctx.font = st.size + 'px ' + st.font;
+          w = ctx.measureText(c.text).width;
+          ctx.restore();
+        } else {
+          w = String(c.text).length * st.size * 0.62;
+        }
+        if (c.angle) {
+          const r = Math.max(w / 2 + 6, st.size / 2 + 5) + t;
+          if (Math.hypot(pt.x - c.x, pt.y - c.y) <= r) return dim;
+        } else {
+          const x1 = c.x - 4 - t, y1 = c.y - st.size - 2 - t;
+          const x2 = c.x + w + 6 + t, y2 = c.y + 5 + t;
+          if (pt.x >= x1 && pt.x <= x2 && pt.y >= y1 && pt.y <= y2) return dim;
+        }
+      }
+      return null;
     },
     /**
      * 拖动标注线：线性标注调整偏移距离、角度标注调整圆弧半径；
@@ -907,6 +951,9 @@
       row('标注类型', '平行距离标注') +
       row('标注对象', '#' + a.id + ' 与 #' + b.id + ' · 直线') +
       row('平行区间', g.mode === 'overlap' ? '线段重叠区间' : '延长线有效区间') +
+      '<div class="row edit"><span class="k">距离</span>' +
+      '<input class="prop-input" type="number" inputmode="decimal" step="any" min="0.01" data-dim="' + dim.id +
+      '" value="' + fmt(g.d) + '"></div>' +
       '<div class="row edit"><span class="k">字体</span><select class="prop-input" data-dim-style="font"' + ref + '>' +
       '<option value="system"' + (fontVal === 'system' ? ' selected' : '') + '>系统</option>' +
       '<option value="mono"' + (fontVal === 'mono' ? ' selected' : '') + '>等宽</option>' +
@@ -922,7 +969,7 @@
       '<option value="solid"' + (st.dash ? '' : ' selected') + '>实线</option>' +
       '<option value="dash"' + (st.dash ? ' selected' : '') + '>虚线</option>' +
       '</select></div>' +
-      '<div class="hint">拖动尺寸线可沿平行方向调整显示位置，距离数值保持不变；字体、字号、颜色与线型修改立即生效。</div>' +
+      '<div class="hint">修改距离值会保持第一条直线不动、沿法线平移第二条直线，使垂直距离精确等于输入值（尺寸驱动，可撤销）；拖动尺寸线只调整显示位置，不改变距离；字体、字号、颜色与线型修改立即生效。</div>' +
       '<div id="propError" class="prop-error hidden"></div>' +
       '<div class="hint"><button class="mini danger" data-dim-del="' + dim.id + '">删除标注</button></div>';
   }
@@ -940,7 +987,7 @@
     angle: { name: '角度', icon: '∠', need: 2 },
     onLine: { name: '点在线上', icon: '⌖', need: 2 },
     overlap: { name: '重叠', icon: '⧉', need: 2 },
-    coincident: { name: '端点重合', icon: '⊙', need: 2 }
+    coincident: { name: '重合', icon: '⊙', need: 2 }
   };
 
   function lineDir(line) {
@@ -1373,7 +1420,14 @@
     return true;
   }
 
-  /** 固定约束涉及的图元快照（求解过程中保持不动） */
+  /** 仅固定端点时的锚点：圆没有端点，以圆心作为参考点 */
+  function fixedAnchorPoints(e) {
+    const pts = Geo.entityEndpoints(e);
+    if (pts.length) return pts.map(function (p) { return { x: p.x, y: p.y }; });
+    if (e.type === 'circle') return [{ x: e.c.x, y: e.c.y }];
+    return [];
+  }
+
   function fixedSnapshot(model) {
     const out = {};
     if (!model.constraints) return out;
@@ -1382,16 +1436,61 @@
       (c.ids || []).forEach(function (id) {
         if (out[id]) return;
         const e = model.findById(id);
-        if (e) out[id] = JSON.parse(JSON.stringify(e));
+        if (!e) return;
+        if (c.onlyEndpoints) out[id] = { onlyEndpoints: true, type: e.type, pts: fixedAnchorPoints(e) };
+        else out[id] = JSON.parse(JSON.stringify(e));
       });
     });
     return out;
   }
 
+  /** 圆弧仅固定端点：保持半径不变，圆心取到两端点距离均为半径的交点 */
+  function pinArcEndpoints(e, p1, p2) {
+    const d = Geo.dist(p1, p2);
+    if (d < 1e-9) return;
+    let c = null;
+    if (e.r >= d / 2 - 1e-9) {
+      const mid = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+      const ux = (p2.x - p1.x) / d, uy = (p2.y - p1.y) / d;
+      const h = Math.sqrt(Math.max(0, e.r * e.r - d * d / 4));
+      const c1 = { x: mid.x - uy * h, y: mid.y + ux * h };
+      const c2 = { x: mid.x + uy * h, y: mid.y - ux * h };
+      c = Geo.dist(c1, e.c) <= Geo.dist(c2, e.c) ? c1 : c2;
+    } else {
+      // 当前半径小于半弦长时退化为半圆，保证端点仍精确落位
+      e.r = d / 2;
+      c = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+    }
+    e.c = c;
+    e.a0 = Math.atan2(p1.y - c.y, p1.x - c.x);
+    e.a1 = Math.atan2(p2.y - c.y, p2.x - c.x);
+  }
+
   function restoreFixed(model, snap) {
     Object.keys(snap).forEach(function (id) {
       const e = model.findById(id);
-      if (e) Geo.copyShape(e, snap[id]);
+      if (!e) return;
+      const s = snap[id];
+      if (!s.onlyEndpoints) { Geo.copyShape(e, s); return; }
+      const pts = s.pts || [];
+      if (!pts.length) return;
+      if (e.type === 'line' && pts.length >= 2) {
+        e.p1 = { x: pts[0].x, y: pts[0].y };
+        e.p2 = { x: pts[1].x, y: pts[1].y };
+      } else if (e.type === 'point' || e.type === 'circle') {
+        const p = { x: pts[0].x, y: pts[0].y };
+        if (e.type === 'point') e.p = p;
+        else e.c = p;
+      } else if (e.type === 'arc' && pts.length >= 2) {
+        pinArcEndpoints(e, pts[0], pts[1]);
+      } else if ((e.type === 'rect' || e.type === 'poly') && pts.length) {
+        // 角点固定：整体平移使角点回到原位，形状与方向保持当前值
+        const cur = fixedAnchorPoints(e);
+        if (cur.length) {
+          const dx = pts[0].x - cur[0].x, dy = pts[0].y - cur[0].y;
+          if (dx || dy) Geo.translateEntity(e, dx, dy);
+        }
+      }
     });
   }
 
@@ -1496,7 +1595,7 @@
       const cs = model.constraints || [];
       let html = '<div class="big">' + cs.length + ' 个约束</div>';
       if (!cs.length) {
-        html += '<div class="hint">在“约束”页选择类型后点按图形即可添加：水平 / 垂直直接点一条直线；对称依次点两个图形和一条对称轴；共线先点基准线再点其它线 / 点 / 圆；相切点两个圆或圆与直线；距离点两个图形后按输入值固定间距；平行点两条直线；固定点一个图形使其保持不动；角度点两条直线后按面板角度固定夹角；点在线上点一个点 / 圆 / 圆弧再点一条直线；重叠先点基准图形，再点要重叠的矩形 / 多边形 / 圆，默认完全重叠，也可按比例自动调整第二个图形；端点重合可点“约束设置”开启自动检测，端点距离小于阈值时自动建立约束。圆与圆弧会自动以圆心作为参考点。</div>';
+        html += '<div class="hint">在“约束”页选择类型后点按图形即可添加：水平 / 垂直直接点一条直线；对称依次点两个图形和一条对称轴；共线先点基准线再点其它线 / 点 / 圆；相切点两个圆或圆与直线；距离点两个图形后按输入值固定间距；平行点两条直线；固定点一个图形使其保持不动，勾选“仅固定端点”时只固定端点 / 圆心位置、形状与方向仍可调整；角度点两条直线后按面板角度固定夹角；点在线上点一个点 / 圆 / 圆弧再点一条直线；重叠先点基准图形，再点要重叠的矩形 / 多边形 / 圆，默认完全重叠，也可按比例自动调整第二个图形；重合先点一个带端点的图形（直线 / 圆弧 / 矩形 / 多边形 / 点），再点另一个图形，自动选取最近的一对端点使其重合；也可在“约束设置”开启端点自动重合，端点距离小于阈值时自动建立约束。圆与圆弧会自动以圆心作为参考点。</div>';
         return html;
       }
       cs.forEach(function (c) {
@@ -1517,6 +1616,8 @@
         } else if (c.type === 'coincident') {
           value = '<span class="con-mode">端点 ' + ((Number(c.aIdx) || 0) + 1) + ' ↔ ' +
             ((Number(c.bIdx) || 0) + 1) + '</span>';
+        } else if (c.type === 'fixed') {
+          value = '<span class="con-mode">' + (c.onlyEndpoints ? '仅端点' : '整体') + '</span>';
         }
         html += '<div class="con-row" data-con-sel="' + c.id + '">' +
           '<div class="con-main">' +
@@ -1527,7 +1628,7 @@
           '<button class="mini danger" data-con-del="' + c.id + '">删除</button>' +
           '</div>';
       });
-      html += '<div class="hint">点按约束行可高亮对应图形；距离 / 角度 / 重叠比例约束可直接修改数值；端点重合约束在图形拖动后自动保持端点一致；固定约束的图形在后续求解中保持不动；删除后约束解除。</div>';
+      html += '<div class="hint">点按约束行可高亮对应图形；距离 / 角度 / 重叠比例约束可直接修改数值；重合约束在图形拖动后自动保持端点一致；固定约束的图形在后续求解中保持不动（“仅端点”模式只固定端点 / 圆心）；删除后约束解除。</div>';
       return html;
     },
     drawMarks: function (R, app) {
