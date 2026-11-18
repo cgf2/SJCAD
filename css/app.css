@@ -535,7 +535,7 @@ select.prop-input { text-align: left; padding: 0 4px; }
   box-shadow: 0 24px 60px rgba(0, 0, 0, .6);
 }
 .modal-head { display: flex; align-items: center; justify-content: space-between; font-size: 15px; }
-#scriptInput {
+#scriptInput, #exportText {
   width: 100%;
   height: 34vh;
   resize: none;

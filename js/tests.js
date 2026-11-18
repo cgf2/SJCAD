@@ -774,6 +774,7 @@
           run: function () {
             const app = mockApp();
             app.params.coord = true;
+            app.params.cmode = 'abs';
             app.params.x1 = 10; app.params.y1 = 10;
             app.params.x2 = 10; app.params.y2 = 110;
             const t = useTool('line');
@@ -1270,6 +1271,86 @@
             const res4 = t._endPoint({ x: 0, y: 0 }, { x: 55, y: 30 });
             near(res4.p.x, 55, 1e-9, '按住 Shift 临时关闭捕捉');
             t.snapHold = false;
+          }
+        },
+        {
+          name: '连续画线 + 坐标输入：起点衔接与增量/绝对切换',
+          run: function () {
+            const app = mockApp();
+            app.params.coord = true;
+            app.params.lchain = true;
+            app.params.cmode = 'rel';
+            app.params.ortho = false;
+            app.params.x1 = 10;
+            app.params.y1 = 20;
+            app.params.x2 = 30;
+            app.params.y2 = 40;
+
+            const defs = global.CADTools.byId('line').params();
+            const cmodeDef = defs.filter(function (f) { return f.key === 'cmode'; })[0];
+            const x2Def = defs.filter(function (f) { return f.key === 'x2'; })[0];
+            assert(cmodeDef && cmodeDef.def === 'rel', '终点输入默认应为增量坐标');
+            assert(cmodeDef.options.length === 2, '应提供绝对 / 增量两种模式');
+            assert(typeof x2Def.validate === 'function', '终点字段应支持实时校验');
+
+            const t = useTool('line');
+            t.applyParams();
+            assert(app.model.count() === 1, '应生成第一条直线');
+            const l1 = app.model.entities[0];
+            near(l1.p1.x, 10, 1e-9, '增量模式起点 X');
+            near(l1.p1.y, 20, 1e-9, '增量模式起点 Y');
+            near(l1.p2.x, 40, 1e-9, '增量模式终点 X = 起点 + ΔX');
+            near(l1.p2.y, 60, 1e-9, '增量模式终点 Y = 起点 + ΔY');
+            assert(t.points.length === 1, '连续画线应从上一条终点继续');
+            near(t.points[0].x, 40, 1e-9, '新起点 = 上一条终点 X');
+            near(t.points[0].y, 60, 1e-9, '新起点 = 上一条终点 Y');
+            near(Number(app.params.x1), 40, 1e-9, '起点参数同步为上一条终点');
+
+            t.applyParams();
+            assert(app.model.count() === 2, '应生成第二条直线');
+            const l2 = app.model.entities[1];
+            near(l2.p1.x, 40, 1e-9, '第二条起点衔接第一条终点');
+            near(l2.p1.y, 60, 1e-9);
+            near(l2.p2.x, 70, 1e-9, '第二条沿用增量 ΔX');
+            near(l2.p2.y, 100, 1e-9, '第二条沿用增量 ΔY');
+
+            app.params.cmode = 'abs';
+            app.params.x2 = -50;
+            app.params.y2 = 0;
+            t.applyParams();
+            assert(app.model.count() === 3, '绝对模式应生成第三条直线');
+            const l3 = app.model.entities[2];
+            near(l3.p1.x, 70, 1e-9, '绝对模式起点仍为上一终点');
+            near(l3.p2.x, -50, 1e-9, '绝对模式终点 X');
+            near(l3.p2.y, 0, 1e-9, '绝对模式终点 Y');
+            near(Number(app.params.x2), -170, 1e-9, '绝对模式下一段终点按相同增量平移');
+
+            // 终点与起点重合时拒绝生成
+            app.params.x2 = -50;
+            app.params.y2 = 0;
+            const before = app.model.count();
+            t.applyParams();
+            assert(app.model.count() === before, '终点与起点重合时应拒绝生成');
+            assert(app.toasts.join('').indexOf('重合') >= 0, '应提示起点与终点重合');
+
+            // 正交 + 增量：按主方向取整
+            app.params.ortho = true;
+            app.params.cmode = 'rel';
+            app.params.x2 = 50;
+            app.params.y2 = 10;
+            t.applyParams();
+            const l4 = app.model.entities[app.model.count() - 1];
+            near(l4.p1.y, 0, 1e-9, '正交起点沿用上一条终点');
+            near(l4.p2.x, 0, 1e-9, '正交优先水平方向 ΔX');
+            near(l4.p2.y, 0, 1e-9, '正交时 Y 与起点对齐');
+
+            // 实时校验：非数字 / 零增量
+            app.params.cmode = 'rel';
+            app.params.x2 = 'abc';
+            assert(x2Def.validate('abc', app.params) !== '', '非数字应给出校验提示');
+            app.params.x2 = 0;
+            app.params.y2 = 0;
+            assert(x2Def.validate(0, app.params).indexOf('重合') >= 0, '零增量应提示重合');
           }
         },
         {
@@ -1805,6 +1886,87 @@
             assert(!D.setValue(d, dim, 'abc').ok, '非数字应拒绝');
             const html = D.infoHtml(d, dim);
             assert(html.indexOf('data-dim') >= 0 && html.indexOf('150') >= 0, '面板应包含可编辑数值');
+          }
+        },
+        {
+          name: '正交标注：按主方向取坐标差',
+          run: function () {
+            const D = global.CADDims;
+            const mk = function (x2, y2) {
+              const d = docWith([line(0, 0, x2, y2)]);
+              const dim = d.addDim({ kind: 'length', entId: d.entities[0].id, offset: 2 });
+              return { d: d, dim: dim };
+            };
+            const h = mk(100, 0);
+            near(D.valueOf(h.d, h.dim, true), 100, 1e-9, '水平正交标注 = Δx');
+            const v = mk(0, 60);
+            near(D.valueOf(v.d, v.dim, true), 60, 1e-9, '垂直正交标注 = Δy');
+            const a45 = mk(100, 100);
+            near(D.valueOf(a45.d, a45.dim), Math.hypot(100, 100), 1e-9, '45° 普通标注为实际长度');
+            near(D.valueOf(a45.d, a45.dim, true), 100, 1e-9, '45° 正交标注取 Δx');
+            const flat = mk(120, 50);
+            near(D.valueOf(flat.d, flat.dim), Math.hypot(120, 50), 1e-9, '斜线普通标注为实际长度');
+            near(D.valueOf(flat.d, flat.dim, true), 120, 1e-9, '斜线正交标注取主方向 Δx');
+            const steep = mk(40, 90);
+            near(D.valueOf(steep.d, steep.dim, true), 90, 1e-9, '陡斜线正交标注取 Δy');
+
+            const panel = D.infoHtml(flat.d, flat.dim, true);
+            assert(panel.indexOf('正交长度') >= 0 && panel.indexOf('120') >= 0, '正交面板显示坐标差');
+            assert(D.setValue(flat.d, flat.dim, 150, true, true).ok, '正交尺寸驱动校验通过');
+            assert(D.setValue(flat.d, flat.dim, 150, false, true).ok, '正交尺寸驱动成功');
+            near(Math.abs(flat.d.entities[0].p2.x - flat.d.entities[0].p1.x), 150, 1e-9, '正交驱动后 Δx=150');
+            near(flat.d.entities[0].p2.y, 50, 1e-9, '正交驱动保持 Δy 不变');
+
+            const normal = mk(120, 50);
+            assert(D.setValue(normal.d, normal.dim, 130, false).ok, '普通尺寸驱动成功');
+            near(Geo.dist(normal.d.entities[0].p1, normal.d.entities[0].p2), 130, 1e-9, '普通驱动按直线长度');
+            near(D.valueOf(normal.d, normal.dim), 130, 1e-9, '普通标注值仍为实际长度');
+          }
+        },
+        {
+          name: '正交标注：拖动越界自动切换方向',
+          run: function () {
+            const D = global.CADDims;
+            const d = docWith([line(0, 0, 120, 50)]);
+            const dim = d.addDim({ kind: 'length', entId: d.entities[0].id, offset: 2 });
+            const app = {
+              model: d, view: { scale: 10 }, params: { dshow: true, dortho: true },
+              dimDrag: {}
+            };
+            near(D.valueOf(d, dim, true), 120, 1e-9, '初始按水平方向标注');
+            assert(D.moveLine(app, dim, { x: 60, y: 10 }) === true, '范围内拖动应成功');
+            assert(dim.orthoAxis === undefined, '范围内拖动保持自动判定');
+            near(D.valueOf(d, dim, true), 120, 1e-9, '方向不变仍取 Δx');
+
+            // 沿箭头方向拖出右边界（120 + 30px/scale）→ 切换为垂直
+            D.moveLine(app, dim, { x: 200, y: 10 });
+            assert(dim.orthoAxis === 'v', '拖出边界应切换为垂直标注');
+            near(D.valueOf(d, dim, true), 50, 1e-9, '切换后按 Δy 显示');
+            assert(app.dimDrag.orthoFlipLock === true, '本次拖动应锁定方向防止来回翻转');
+            D.moveLine(app, dim, { x: 10, y: 10 });
+            assert(dim.orthoAxis === 'v', '同一次拖动内不应再次翻转');
+
+            // 新一次拖动：垂直方向拖出上下边界 → 切回水平
+            app.dimDrag = {};
+            D.moveLine(app, dim, { x: 60, y: 10 });
+            assert(dim.orthoAxis === 'v', '未越界时保持已切换的方向');
+            near(D.valueOf(d, dim, true), 50, 1e-9, '保持垂直方向数值');
+            D.moveLine(app, dim, { x: 60, y: 200 });
+            assert(dim.orthoAxis === 'h', '拖出上下边界应切回水平');
+            near(D.valueOf(d, dim, true), 120, 1e-9, '切回后按 Δx 显示');
+
+            // 非正交拖动不改变正交方向语义
+            const d2 = docWith([line(0, 0, 120, 50)]);
+            const dim2 = d2.addDim({ kind: 'length', entId: d2.entities[0].id, offset: 2 });
+            const app2 = {
+              model: d2, view: { scale: 10 }, params: { dshow: true, dortho: false },
+              dimDrag: {}
+            };
+            const L2 = Geo.dist({ x: 0, y: 0 }, { x: 120, y: 50 });
+            const n2 = { x: -50 / L2, y: 120 / L2 };
+            D.moveLine(app2, dim2, { x: n2.x * 10, y: n2.y * 10 });
+            assert(dim2.orthoAxis === undefined, '非正交拖动不设置正交方向');
+            near(dim2.offset, 10, 1e-9, '非正交偏移仍按法向投影');
           }
         },
         {

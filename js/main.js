@@ -268,6 +268,7 @@
     function notifyParam(f) {
       if (typeof App.tool.onParamChange === 'function') App.tool.onParamChange(f.key, App.params[f.key]);
       if (f.type === 'choice' || f.type === 'toggle') App.updateParams();
+      if (f.key === 'dortho' && App.dimId) App.refreshDimPanel();
       App.updatePrompt();
       App.refresh();
     }
@@ -349,7 +350,13 @@
         input.value = App.params[f.key];
         input.addEventListener('input', function () {
           App.params[f.key] = input.value;
-          markParam(input, f);
+          let msg = markParam(input, f);
+          if (!msg && typeof f.validate === 'function') msg = f.validate(input.value, App.params);
+          input.classList.toggle('invalid', !!msg);
+          // 实时回收编辑中的数值（不重建面板，避免输入框失焦）
+          if (App.tool && typeof App.tool.onParamChange === 'function') {
+            App.tool.onParamChange(f.key, App.params[f.key]);
+          }
           App.refresh();
         });
         wrap.appendChild(label);
@@ -369,7 +376,11 @@
         let bad = null;
         row.querySelectorAll('input[data-kind="number"]').forEach(function (input) {
           const f = fields.filter(function (fd) { return fd.key === input.dataset.key; })[0];
-          const msg = f ? markParam(input, f) : '';
+          let msg = f ? markParam(input, f) : '';
+          if (!msg && f && typeof f.validate === 'function') {
+            msg = f.validate(input.value, App.params);
+            input.classList.toggle('invalid', !!msg);
+          }
           if (msg && !bad) bad = msg;
         });
         if (bad) { App.toast('输入不合法：' + bad); return; }
@@ -522,7 +533,7 @@
     const D = window.CADDims;
     const dim = App.model.findDim(id);
     if (!D || !dim) { App.hideInfo(); return; }
-    App.showInfo('尺寸标注', D.infoHtml(App.model, dim));
+    App.showInfo('尺寸标注', D.infoHtml(App.model, dim, !!(App.params && App.params.dortho)));
     App.dimId = id;
   };
 
@@ -532,7 +543,7 @@
     const dim = App.model.findDim(App.dimId);
     if (!D || !dim) { App.dimId = null; App.hideInfo(); return; }
     $('infoTitle').textContent = '尺寸标注';
-    $('infoBody').innerHTML = D.infoHtml(App.model, dim);
+    $('infoBody').innerHTML = D.infoHtml(App.model, dim, !!(App.params && App.params.dortho));
     $('infoPanel').classList.remove('hidden');
     $('selBar').classList.add('hidden');
   };
@@ -557,13 +568,14 @@
     if (!D) return;
     const dim = App.model.findDim(input.dataset.dim);
     if (!dim) return;
-    const check = D.setValue(App.model, dim, input.value, true);
+    const ortho = !!(App.params && App.params.dortho);
+    const check = D.setValue(App.model, dim, input.value, true, ortho);
     if (!check.ok) { setPropError(input, check.error); return; }
     setPropError(input, '');
     if (!dimDirty) { dimDirty = true; App.begin(); }
-    D.setValue(App.model, dim, input.value, false);
+    D.setValue(App.model, dim, input.value, false, ortho);
     App.solveConstraints();
-    D.updateOutputs($('infoBody'), App.model, dim);
+    D.updateOutputs($('infoBody'), App.model, dim, ortho);
     App.refresh();
   }
 
@@ -1231,27 +1243,58 @@
   function closeMenu() { $('menuSheet').classList.add('hidden'); }
 
   function exportJSON() {
-    const data = JSON.stringify({ version: 1, entities: App.model.entities }, null, 2);
-    const blob = new Blob([data], { type: 'application/json' });
+    // 先展示内容，避免部分手机浏览器下载后文件难以找到
+    $('exportText').value = JSON.stringify({ version: 1, entities: App.model.entities }, null, 2);
+    closeMenu();
+    $('exportModal').classList.remove('hidden');
+  }
+
+  function downloadExport() {
+    // UTF-8 无 BOM 的纯文本；内容仍为结构化 JSON，便于文本编辑器查看与再次导入
+    const data = $('exportText').value;
+    const blob = new Blob([data], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     const d = new Date();
-    const stamp = d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0');
+    const stamp = d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0') +
+      '-' + String(d.getHours()).padStart(2, '0') + String(d.getMinutes()).padStart(2, '0');
     a.href = url;
-    a.download = 'cad-' + stamp + '.json';
+    a.download = 'cad-' + stamp + '.txt';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
-    closeMenu();
-    App.toast('已导出 JSON');
+    App.toast('已开始下载 TXT 文件，可在浏览器“下载管理”中查看');
+  }
+
+  function copyExport() {
+    const box = $('exportText');
+    if (!box) return;
+    box.focus();
+    box.select();
+    box.setSelectionRange(0, box.value.length);
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    if (ok) { App.toast('已复制 JSON 内容'); return; }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(box.value).then(function () {
+        App.toast('已复制 JSON 内容');
+      }, function () {
+        App.toast('复制失败，请长按文本框手动复制');
+      });
+    } else {
+      App.toast('复制失败，请长按文本框手动复制');
+    }
   }
 
   function importJSON(file) {
     const reader = new FileReader();
     reader.onload = function () {
       try {
-        const data = JSON.parse(String(reader.result));
+        // 兼容 TXT 纯文本（可能带 BOM / 首尾空白）与旧版 JSON 文件
+        let text = String(reader.result);
+        if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+        const data = JSON.parse(text.trim());
         const list = Array.isArray(data) ? data : data.entities;
         if (!Array.isArray(list)) throw new Error('缺少 entities 数组');
         const valid = list.filter(function (e) {
@@ -1462,6 +1505,15 @@
     const file = e.target.files && e.target.files[0];
     if (file) importJSON(file);
     e.target.value = '';
+  });
+
+  $('exportClose').addEventListener('click', function () {
+    $('exportModal').classList.add('hidden');
+  });
+  $('exportDownload').addEventListener('click', downloadExport);
+  $('exportCopy').addEventListener('click', copyExport);
+  $('exportModal').addEventListener('click', function (e) {
+    if (e.target.id === 'exportModal') $('exportModal').classList.add('hidden');
   });
 
   document.querySelectorAll('.sheet-item').forEach(function (btn) {

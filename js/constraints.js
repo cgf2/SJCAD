@@ -264,7 +264,7 @@
       }
       return { ok: true };
     },
-    valueOf: function (model, dim) {
+    valueOf: function (model, dim, ortho) {
       if (dim.kind === 'angle') {
         const g = angleGeomFor(model, dim);
         return g ? g.deg : null;
@@ -275,13 +275,15 @@
       }
       const e = model.findById(dim.entId);
       if (!e) return null;
-      if (dim.kind === 'length' && e.type === 'line') return Geo.dist(e.p1, e.p2);
+      if (dim.kind === 'length' && e.type === 'line') {
+        return ortho ? orthoValue(e, dim) : Geo.dist(e.p1, e.p2);
+      }
       if (dim.kind === 'diameter' && e.type === 'circle') return e.r * 2;
       if (dim.kind === 'radius' && e.type === 'arc') return e.r;
       return null;
     },
-    /** 尺寸驱动：把标注数值写回图元；dryRun=true 只校验 */
-    setValue: function (model, dim, raw, dryRun) {
+    /** 尺寸驱动：把标注数值写回图元；dryRun=true 只校验；ortho=true 按正交坐标差驱动 */
+    setValue: function (model, dim, raw, dryRun, ortho) {
       if (!dim) return { ok: false, error: '标注不存在' };
       if (raw === '' || raw == null) return { ok: false, error: '请输入数值' };
       const v = Number(raw);
@@ -321,6 +323,17 @@
         const L = Geo.dist(e.p1, e.p2);
         if (L < 1e-9) return { ok: false, error: '直线长度无效' };
         if (dryRun) return { ok: true };
+        if (ortho) {
+          // 正交驱动：按当前正交方向调整终点坐标，使对应坐标差等于输入值
+          if (orthoAxisOf(e, dim) === 'h') {
+            const sign = e.p2.x >= e.p1.x ? 1 : -1;
+            e.p2 = { x: e.p1.x + sign * v, y: e.p2.y };
+          } else {
+            const sign = e.p2.y >= e.p1.y ? 1 : -1;
+            e.p2 = { x: e.p2.x, y: e.p1.y + sign * v };
+          }
+          return { ok: true };
+        }
         const u = { x: (e.p2.x - e.p1.x) / L, y: (e.p2.y - e.p1.y) / L };
         e.p2 = { x: e.p1.x + u.x * v, y: e.p1.y + u.y * v };
         return { ok: true };
@@ -345,13 +358,14 @@
       const b = model.findById(dim.ids[1]);
       return !!(a && b && a.type === 'line' && b.type === 'line');
     },
-    infoHtml: function (model, dim) {
+    infoHtml: function (model, dim, ortho) {
       if (dim.kind === 'pdist') return parallelInfoHtml(model, dim);
       const isAngle = dim.kind === 'angle';
       const e = isAngle ? null : model.findById(dim.entId);
       if (!isAngle && !e) return '<div class="hint">标注对象已删除，请重新标注。</div>';
-      const v = this.valueOf(model, dim);
-      const field = dim.kind === 'length' ? '长度' : dim.kind === 'diameter' ? '直径'
+      const v = this.valueOf(model, dim, ortho);
+      const field = dim.kind === 'length' ? (ortho ? '正交长度' : '长度')
+        : dim.kind === 'diameter' ? '直径'
         : dim.kind === 'radius' ? '半径' : '角度';
       const suffix = isAngle ? '°' : '';
       const disp = v == null ? '-' : this.prefix(dim.kind) + fmt(v) + suffix;
@@ -368,7 +382,9 @@
         ? (this.canDrive(model, dim)
           ? '修改角度后第二条直线绕交点旋转（0~180°）；可撤销。'
           : '当前角度标注仅支持测量显示，尺寸驱动需两条相交直线。')
-        : '修改数值后图形自动同步（尺寸驱动）：直线保持起点伸缩，圆 / 圆弧改变半径；可撤销。';
+        : (ortho && dim.kind === 'length'
+          ? '正交标注显示主方向的水平 / 垂直坐标差；修改数值会沿该方向移动终点；可撤销。'
+          : '修改数值后图形自动同步（尺寸驱动）：直线保持起点伸缩，圆 / 圆弧改变半径；可撤销。');
       const inputRow = isAngle && !this.canDrive(model, dim) ? '' :
         '<div class="row edit"><span class="k">' + field + '</span>' +
         '<input class="prop-input" type="number" inputmode="decimal" step="any" data-dim="' + dim.id +
@@ -381,11 +397,11 @@
         '<div id="propError" class="prop-error hidden"></div>' +
         '<div class="hint"><button class="mini danger" data-dim-del="' + dim.id + '">删除标注</button></div>';
     },
-    updateOutputs: function (body, model, dim) {
+    updateOutputs: function (body, model, dim, ortho) {
       if (!body) return;
       const el = body.querySelector('[data-out="dimval"]');
       if (!el) return;
-      const v = this.valueOf(model, dim);
+      const v = this.valueOf(model, dim, ortho);
       el.textContent = this.prefix(dim.kind) + fmt(v) + (dim.kind === 'angle' ? '°' : '');
     },
     /* ---------- 绘制 ---------- */
@@ -482,7 +498,25 @@
         if (L < 1e-6) return false;
         let off;
         if (app.params && app.params.dortho) {
-          const horizontal = Math.abs(p2.x - p1.x) >= Math.abs(p2.y - p1.y);
+          // 正交标注：沿箭头方向拖出投影端点约 30px 后，水平 / 垂直方向自动互换
+          let axis = orthoAxisOf(e, dim);
+          const dd = app.dimDrag;
+          if (!(dd && dd.orthoFlipLock)) {
+            const bound = 30 / scale;
+            const flip = function () {
+              axis = axis === 'h' ? 'v' : 'h';
+              dim.orthoAxis = axis;
+              if (dd) dd.orthoFlipLock = true;
+            };
+            if (axis === 'h') {
+              const lo = Math.min(p1.x, p2.x) - bound, hi = Math.max(p1.x, p2.x) + bound;
+              if (w.x < lo || w.x > hi) flip();
+            } else {
+              const lo = Math.min(p1.y, p2.y) - bound, hi = Math.max(p1.y, p2.y) + bound;
+              if (w.y < lo || w.y > hi) flip();
+            }
+          }
+          const horizontal = axis === 'h';
           const base = horizontal ? Math.max(p1.y, p2.y) : Math.max(p1.x, p2.x);
           off = horizontal ? w.y - base : w.x - base;
         } else {
@@ -617,6 +651,19 @@
     else R.label(text, pt, st.color, { font: st.font, size: st.size });
   }
 
+  /** 正交标注方向：拖动切换后使用固定方向，否则按线段主方向自动判定 */
+  function orthoAxisOf(e, dim) {
+    if (dim && (dim.orthoAxis === 'h' || dim.orthoAxis === 'v')) return dim.orthoAxis;
+    return Math.abs(e.p2.x - e.p1.x) >= Math.abs(e.p2.y - e.p1.y) ? 'h' : 'v';
+  }
+
+  /** 正交标注值：按当前正交方向取对应坐标差 */
+  function orthoValue(e, dim) {
+    return orthoAxisOf(e, dim) === 'h'
+      ? Math.abs(e.p2.x - e.p1.x)
+      : Math.abs(e.p2.y - e.p1.y);
+  }
+
   function drawLinear(R, app, e, dim, ortho) {
     const p1 = e.p1, p2 = e.p2;
     const L = Geo.dist(p1, p2);
@@ -628,7 +675,8 @@
     const hot = isHot(app, dim);
 
     if (ortho) {
-      const horizontal = Math.abs(p2.x - p1.x) >= Math.abs(p2.y - p1.y);
+      const horizontal = orthoAxisOf(e, dim) === 'h';
+      const ov = orthoValue(e, dim);
       let q1, q2, e1s, e1e, e2s, e2e;
       if (horizontal) {
         const y = Math.max(p1.y, p2.y) + off;
@@ -659,9 +707,9 @@
       recordLine(dim, [{ ax: a.x, ay: a.y, bx: b.x, by: b.y }]);
       const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
       if (horizontal) {
-        drawDimLabel(R, app, dim, { x: mid.x + 6, y: mid.y - 8 }, fmt(L), 0);
+        drawDimLabel(R, app, dim, { x: mid.x + 6, y: mid.y - 8 }, fmt(ov), 0);
       } else {
-        drawDimLabel(R, app, dim, { x: mid.x + 10, y: mid.y }, fmt(L), -Math.PI / 2);
+        drawDimLabel(R, app, dim, { x: mid.x + 10, y: mid.y }, fmt(ov), -Math.PI / 2);
       }
       return;
     }

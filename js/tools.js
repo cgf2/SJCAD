@@ -523,6 +523,18 @@
       return base;
     },
     params: function () {
+      // 实时校验：终点的绝对 / 增量坐标换算后不得与起点重合，且须为有效数字
+      const coordValidate = function (v, p) {
+        const x1 = Number(p.x1), y1 = Number(p.y1);
+        const a = Number(p.x2), b = Number(p.y2);
+        if (!isFinite(x1) || !isFinite(y1) || !isFinite(a) || !isFinite(b)) return '请输入有效数值';
+        let ex = p.cmode === 'abs' ? a : x1 + a;
+        let ey = p.cmode === 'abs' ? b : y1 + b;
+        if (p.ortho) {
+          if (Math.abs(ex - x1) >= Math.abs(ey - y1)) ey = y1; else ex = x1;
+        }
+        return (Math.abs(ex - x1) < 1e-6 && Math.abs(ey - y1) < 1e-6) ? '起点与终点不能重合' : '';
+      };
       return [
         { key: 'ortho', type: 'toggle', label: '正交', def: false, group: '模式' },
         { key: 'lchain', type: 'toggle', label: '连续画线', def: false, group: '模式' },
@@ -554,6 +566,11 @@
         },
         { key: 'coord', type: 'toggle', label: '坐标输入', def: false, group: '坐标输入' },
         {
+          key: 'cmode', type: 'choice', label: '终点输入', def: 'rel', group: '坐标输入',
+          when: function (p) { return p.coord === true; },
+          options: [{ v: 'abs', label: '绝对坐标' }, { v: 'rel', label: '增量坐标' }]
+        },
+        {
           key: 'x1', label: 'X', def: 0, group: '起点',
           when: function (p) { return p.coord === true; }
         },
@@ -562,12 +579,16 @@
           when: function (p) { return p.coord === true; }
         },
         {
-          key: 'x2', label: 'X', def: 100, group: '终点',
-          when: function (p) { return p.coord === true; }
+          key: 'x2', label: App.params.cmode === 'abs' ? 'X' : 'ΔX', def: 100,
+          group: App.params.cmode === 'abs' ? '终点（绝对）' : '终点（增量）',
+          when: function (p) { return p.coord === true; },
+          validate: coordValidate
         },
         {
-          key: 'y2', label: 'Y', def: 0, group: '终点',
-          when: function (p) { return p.coord === true; }
+          key: 'y2', label: App.params.cmode === 'abs' ? 'Y' : 'ΔY', def: 0,
+          group: App.params.cmode === 'abs' ? '终点（绝对）' : '终点（增量）',
+          when: function (p) { return p.coord === true; },
+          validate: coordValidate
         }
       ];
     },
@@ -581,6 +602,7 @@
       this.snapMode = null;
       this.snapPt = null;
       this.chainLastId = null;
+      this._coordPreview = false;
       App.params.lref = '';
       App.params.larc = false;
       App.params.tangent = false;
@@ -588,6 +610,8 @@
       if (App.updateParams) App.updateParams();
     },
     activate: function () {
+      // 终点输入默认增量坐标（cmode 在坐标输入开启前是隐藏字段，需在此兜底）
+      if (App.params.cmode !== 'abs' && App.params.cmode !== 'rel') App.params.cmode = 'rel';
       this.snapOff = false;
       this.snapHold = false;
       this._bindSnapKeys();
@@ -697,6 +721,7 @@
     },
     onHover: function (p) {
       this.hover = p;
+      this._coordPreview = false;
       if (this.points.length > 1) return;
       this._scanRef(p);
     },
@@ -838,6 +863,11 @@
       return created[0] || null;
     },
     onParamChange: function (key, val) {
+      // 编辑坐标类参数时切换到坐标预览（指针移回画布后恢复拖动预览）
+      if (key === 'x1' || key === 'y1' || key === 'x2' || key === 'y2' ||
+          key === 'cmode' || key === 'coord' || key === 'ortho') {
+        this._coordPreview = App.params.coord === true;
+      }
       if (key !== 'llink') return;
       App.toast(val
         ? '已开启线首尾自动链接：连续画线时相邻线段端点自动建立重合约束'
@@ -864,27 +894,43 @@
       }
       App.refresh();
     },
-    applyParams: function () {
-      if (App.params.coord !== true) { App.toast('请先勾选“坐标输入”再输入坐标'); return; }
-      const x1 = Number(App.params.x1), y1 = Number(App.params.y1);
-      let x2 = Number(App.params.x2), y2 = Number(App.params.y2);
-      if (!isFinite(x1) || !isFinite(y1) || !isFinite(x2) || !isFinite(y2)) {
-        App.toast('请输入有效的坐标数值'); return;
-      }
+    /** 坐标输入换算为绝对起终点；start 传入时以该点作为起点（连续画线自动衔接上一条终点） */
+    _coordEnd: function (start) {
+      const x1 = start ? start.x : Number(App.params.x1);
+      const y1 = start ? start.y : Number(App.params.y1);
+      const a = Number(App.params.x2), b = Number(App.params.y2);
+      if (!isFinite(x1) || !isFinite(y1) || !isFinite(a) || !isFinite(b)) return null;
+      let x2 = App.params.cmode === 'abs' ? a : x1 + a;
+      let y2 = App.params.cmode === 'abs' ? b : y1 + b;
       if (App.params.ortho) {
         if (Math.abs(x2 - x1) >= Math.abs(y2 - y1)) y2 = y1; else x2 = x1;
       }
-      if (Geo.dist({ x: x1, y: y1 }, { x: x2, y: y2 }) < 1e-6) {
+      return { x1: x1, y1: y1, x2: x2, y2: y2 };
+    },
+    applyParams: function () {
+      if (App.params.coord !== true) { App.toast('请先勾选“坐标输入”再输入坐标'); return; }
+      // 连续画线 + 坐标输入：起点强制取上一条已完成直线的终点
+      const start = this.points.length ? this.points[0] : null;
+      const c = this._coordEnd(start);
+      if (!c) { App.toast('请输入有效的坐标数值'); return; }
+      if (Geo.dist({ x: c.x1, y: c.y1 }, { x: c.x2, y: c.y2 }) < 1e-6) {
         App.toast('起点与终点不能重合'); return;
       }
-      if (App.params.ortho) {
-        App.params.x2 = round3(x2);
-        App.params.y2 = round3(y2);
+      if (App.params.ortho && App.params.cmode === 'abs') {
+        App.params.x2 = round3(c.x2);
+        App.params.y2 = round3(c.y2);
         if (App.updateParams) App.updateParams();
       }
-      this._addLine({ type: 'line', p1: { x: x1, y: y1 }, p2: { x: x2, y: y2 } });
+      this._addLine({ type: 'line', p1: { x: c.x1, y: c.y1 }, p2: { x: c.x2, y: c.y2 } });
       if (App.params.lchain) {
-        this._startAt({ x: x2, y: y2 });
+        const dx = c.x2 - c.x1, dy = c.y2 - c.y1;
+        this._startAt({ x: c.x2, y: c.y2 });
+        if (App.params.cmode === 'abs') {
+          // 绝对模式：下一段终点同步平移，避免与新起点重合
+          App.params.x2 = round3(c.x2 + dx);
+          App.params.y2 = round3(c.y2 + dy);
+          if (App.updateParams) App.updateParams();
+        }
         App.toast('已生成直线，连续画线从终点继续');
       } else {
         this.reset();
@@ -904,6 +950,17 @@
       else App.toast('已取消当前直线');
     },
     onRender: function (ctx, R) {
+      // 坐标输入动态预览：面板正在编辑坐标时，预览“确定”后将生成的直线
+      if (App.params.coord === true && this._coordPreview) {
+        const c = this._coordEnd(this.points.length ? this.points[0] : null);
+        if (c && Geo.dist({ x: c.x1, y: c.y1 }, { x: c.x2, y: c.y2 }) >= 1e-6) {
+          const p0 = { x: c.x1, y: c.y1 }, p1 = { x: c.x2, y: c.y2 };
+          R.previewLine(p0, p1);
+          R.previewMarker(p0, '起点');
+          R.previewLabel('终点 ' + fmt(p1.x) + ', ' + fmt(p1.y), p1);
+          return;
+        }
+      }
       if (this.points.length !== 1) return;
       const p0 = this.points[0];
       let p1 = this.hover;
