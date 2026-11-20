@@ -916,22 +916,13 @@
       if (Geo.dist({ x: c.x1, y: c.y1 }, { x: c.x2, y: c.y2 }) < 1e-6) {
         App.toast('起点与终点不能重合'); return;
       }
-      if (App.params.ortho && App.params.cmode === 'abs') {
-        App.params.x2 = round3(c.x2);
-        App.params.y2 = round3(c.y2);
-        if (App.updateParams) App.updateParams();
-      }
       this._addLine({ type: 'line', p1: { x: c.x1, y: c.y1 }, p2: { x: c.x2, y: c.y2 } });
+      // 生成后终点输入清零，起点自动续接上一条终点，直接输入下一段终点即可
+      App.params.x2 = 0;
+      App.params.y2 = 0;
       if (App.params.lchain) {
-        const dx = c.x2 - c.x1, dy = c.y2 - c.y1;
         this._startAt({ x: c.x2, y: c.y2 });
-        if (App.params.cmode === 'abs') {
-          // 绝对模式：下一段终点同步平移，避免与新起点重合
-          App.params.x2 = round3(c.x2 + dx);
-          App.params.y2 = round3(c.y2 + dy);
-          if (App.updateParams) App.updateParams();
-        }
-        App.toast('已生成直线，连续画线从终点继续');
+        App.toast('已生成直线，起点已续接，终点输入已清零');
       } else {
         this.reset();
         App.updatePrompt();
@@ -2065,21 +2056,101 @@
   /* ================= 编辑：平移 ================= */
   const moveTool = baseTool({
     id: 'move', name: '平移', cat: 'edit', icon: '↔', dragType: 'tool',
+    mtoBase: null,
+    reset: function () {
+      this.points = [];
+      this.hover = null;
+      this.mtoBase = null;
+      this.active = false;
+      this.panning = false;
+      this.clones = null;
+    },
     prompt: function () {
+      if (App.params.mto) {
+        const n = App.model.selected.size;
+        if (!n) return '移动到：点按图形选择要移动的元素';
+        if (!this.mtoBase) return '已选 ' + n + ' 个，点按图形拾取基准点（自动吸附端点/圆心/交点）';
+        return '基准点（' + fmt(this.mtoBase.x) + '，' + fmt(this.mtoBase.y) +
+          '）：点按目标位置，或输入目标 X/Y 后确定';
+      }
       if (App.params.multi) {
         const n = App.model.selected.size;
         return n ? '已选 ' + n + ' 个，继续点选，输入 X/Y 偏移后确定' : '点按图形连续选择（可多选），输入偏移后确定';
       }
       return '拖动图形平移，或输入 X/Y 偏移后确定';
     },
+    /** 把选中元素的基准点精确移动到目标坐标（tx, ty） */
+    _moveToTarget: function (tx, ty) {
+      const list = App.model.selectedEntities();
+      if (!list.length) { App.toast('请先选中一个或多个图形'); return false; }
+      const base = this.mtoBase;
+      if (!base) { App.toast('请先在图形上点选基准点'); return false; }
+      if (!isFinite(tx) || !isFinite(ty)) { App.toast('请输入有效的目标坐标'); return false; }
+      const dx = tx - base.x, dy = ty - base.y;
+      if (!isFinite(dx) || !isFinite(dy)) { App.toast('移动距离超出有效范围'); return false; }
+      if (Math.abs(dx) < 1e-9 && Math.abs(dy) < 1e-9) {
+        App.toast('基准点已在目标位置');
+        return false;
+      }
+      App.begin();
+      list.forEach(function (e) { Geo.translateEntity(e, dx, dy); });
+      App.end();
+      App.params.tx = round3(tx);
+      App.params.ty = round3(ty);
+      this.mtoBase = null;
+      App.afterSelectionChange();
+      if (App.updateParams) App.updateParams();
+      App.updatePrompt();
+      App.toast('已将基准点移动到（' + fmt(tx) + '，' + fmt(ty) + '）');
+      return true;
+    },
     params: function () {
+      const mto = function (p) { return p.mto === true; };
+      const offsetMode = function (p) { return p.mto !== true; };
       return [
-        { key: 'multi', type: 'toggle', label: '连续选择', def: false, group: '选择' },
-        { key: 'mx', label: 'X 偏移', def: 0, group: '偏移量' },
-        { key: 'my', label: 'Y 偏移', def: 0, group: '偏移量' }
+        { key: 'multi', type: 'toggle', label: '连续选择', def: false, group: '选择', when: offsetMode },
+        { key: 'mto', type: 'toggle', label: '移动到', def: false, group: '移动方式' },
+        { key: 'tx', label: '目标 X', def: 0, group: '目标坐标', when: mto },
+        { key: 'ty', label: '目标 Y', def: 0, group: '目标坐标', when: mto },
+        { key: 'mx', label: 'X 偏移', def: 0, group: '偏移量', when: offsetMode },
+        { key: 'my', label: 'Y 偏移', def: 0, group: '偏移量', when: offsetMode }
       ];
     },
     onTap: function (p) {
+      if (App.params.mto) {
+        const sel = App.model.selected;
+        const hit = App.pick(p);
+        // 1) 还没有选中元素：点按选择
+        if (!sel.size) {
+          if (hit) {
+            sel.add(hit.id);
+            App.afterSelectionChange();
+            App.updatePrompt();
+            App.toast('已选中图形，请点按拾取基准点');
+          }
+          return;
+        }
+        // 2) 已选中但未定基准点：点按元素切换选中，点按任意位置拾取基准点
+        if (!this.mtoBase) {
+          if (hit && !sel.has(hit.id)) {
+            sel.clear();
+            sel.add(hit.id);
+            App.afterSelectionChange();
+            App.updatePrompt();
+            App.toast('已切换选中图形，请点按拾取基准点');
+            return;
+          }
+          const q = App.snapPoint(p);
+          this.mtoBase = { x: q.x, y: q.y };
+          App.updatePrompt();
+          App.toast('基准点（' + fmt(q.x) + '，' + fmt(q.y) + '），点按目标位置或输入坐标');
+          return;
+        }
+        // 3) 已有基准点：点按确定目标位置
+        const q = App.snapPoint(p);
+        this._moveToTarget(q.x, q.y);
+        return;
+      }
       const e = App.pick(p);
       if (!App.params.multi) {
         if (e && !App.model.selected.size) {
@@ -2096,12 +2167,24 @@
       App.afterSelectionChange();
       App.updatePrompt();
     },
+    onParamChange: function (key) {
+      if (key === 'mto') this.mtoBase = null;
+    },
     applyParams: function () {
+      const list = App.model.selectedEntities();
+      if (!list.length) { App.toast('请先选中一个或多个图形'); return; }
+      if (App.params.mto) {
+        const rawX = App.params.tx, rawY = App.params.ty;
+        if (rawX === '' || rawY === '' || rawX == null || rawY == null) { App.toast('请输入目标坐标 X/Y'); return; }
+        const tx = Number(rawX), ty = Number(rawY);
+        if (!isFinite(tx) || !isFinite(ty)) { App.toast('请输入有效的目标坐标'); return; }
+        if (!this.mtoBase) { App.toast('请先在图形上点选基准点'); return; }
+        this._moveToTarget(tx, ty);
+        return;
+      }
       const dx = Number(App.params.mx), dy = Number(App.params.my);
       if (!isFinite(dx) || !isFinite(dy)) { App.toast('请输入有效的偏移数值'); return; }
       if (Math.abs(dx) < 1e-9 && Math.abs(dy) < 1e-9) { App.toast('X/Y 偏移量不能同时为 0'); return; }
-      const list = App.model.selectedEntities();
-      if (!list.length) { App.toast('请先选中一个或多个图形'); return; }
       App.begin();
       list.forEach(function (e) { Geo.translateEntity(e, dx, dy); });
       App.end();
@@ -2110,6 +2193,8 @@
       App.toast('已平移 ' + list.length + ' 个图元（ΔX ' + fmt(dx) + '，ΔY ' + fmt(dy) + '）');
     },
     onDragStart: function (p) {
+      // 移动到模式：拖动用于平移视图，避免误移动图形
+      if (App.params.mto) { this.panning = true; this.last = p; return; }
       if (App.params.multi) return;
       if (!App.model.selected.size) {
         const e = App.pick(p);

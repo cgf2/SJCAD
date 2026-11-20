@@ -221,6 +221,41 @@ html, body {
 }
 .switch input:checked + .track { background: rgba(62, 208, 255, .35); border-color: var(--accent); }
 .switch input:checked + .track::after { transform: translateX(18px); background: var(--accent); }
+
+/* ============ 折叠面板底部 · 单行快捷开关栏 ============ */
+.quick-switch-row {
+  display: flex;
+  flex-wrap: nowrap;           /* 强制单行，不折行 */
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+  height: 24px;
+  overflow: hidden;            /* 超出时压缩显示，不撑高 */
+}
+.quick-switch-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 1 auto;
+  min-width: 0;                /* 允许标签压缩省略 */
+  height: 24px;
+  padding: 0 2px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.quick-switch-item .switch-text {
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.quick-switch-item .switch { width: 34px; height: 20px; }
+.quick-switch-item .switch .track::after { width: 14px; height: 14px; }
+.quick-switch-item .switch input:checked + .track::after { transform: translateX(14px); }
 .param-choice { flex: 1 1 100%; }
 .seg {
   display: flex;

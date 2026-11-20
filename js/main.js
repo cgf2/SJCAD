@@ -231,6 +231,49 @@
     return msg;
   }
 
+  /** 折叠面板底部 · 单行快捷开关栏：收起状态下也能直接切换 */
+  function renderQuickSwitches(fields) {
+    const bar = $('quickSwitchRow');
+    if (!bar) return;
+    bar.innerHTML = '';
+    const toggles = (fields || []).filter(function (f) { return f.type === 'toggle'; });
+    if (!toggles.length) {
+      bar.classList.add('hidden');
+      return;
+    }
+    toggles.forEach(function (f) {
+      const item = document.createElement('label');
+      item.className = 'quick-switch-item';
+      item.title = f.label;
+      const text = document.createElement('span');
+      text.className = 'switch-text';
+      text.textContent = f.label;
+      const sw = document.createElement('span');
+      sw.className = 'switch';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.dataset.key = f.key;
+      cb.checked = !!App.params[f.key];
+      cb.setAttribute('aria-label', f.label);
+      cb.addEventListener('change', function () {
+        App.params[f.key] = cb.checked;
+        if (typeof App.tool.onParamChange === 'function') App.tool.onParamChange(f.key, App.params[f.key]);
+        if (f.key === 'dortho' && App.dimId) App.refreshDimPanel();
+        App.updatePrompt();
+        App.updateParams();
+        App.refresh();
+      });
+      const track = document.createElement('span');
+      track.className = 'track';
+      sw.appendChild(cb);
+      sw.appendChild(track);
+      item.appendChild(text);
+      item.appendChild(sw);
+      bar.appendChild(item);
+    });
+    bar.classList.remove('hidden');
+  }
+
   App.updateParams = function () {
     const row = $('paramRow');
     row.innerHTML = '';
@@ -238,6 +281,7 @@
     const fields = raw.filter(function (f) {
       return typeof f.when !== 'function' || f.when(App.params);
     });
+    renderQuickSwitches(fields);
     if (!fields.length) {
       row.classList.add('hidden');
       const tg = $('paramToggle');

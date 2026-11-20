@@ -908,6 +908,141 @@
           }
         },
         {
+          name: '平移工具：移动到（点击拾取基准点 + 点击/坐标目标）',
+          run: function () {
+            const app = mockApp();
+            const t = useTool('move');
+            const defs = t.params();
+            const mtoDef = defs.filter(function (f) { return f.key === 'mto'; })[0];
+            const txDef = defs.filter(function (f) { return f.key === 'tx'; })[0];
+            assert(mtoDef && mtoDef.def === false, '「移动到」默认应关闭');
+            assert(!defs.some(function (f) { return f.key === 'mref' || f.key === 'ax' || f.key === 'ay'; }),
+              '参考点仅支持点击拾取，不应再有参考点输入项');
+            assert(txDef.when({ mto: false }) !== true, '关闭时不应显示目标坐标');
+            assert(txDef.when({ mto: true }) === true, '开启后应显示目标坐标');
+
+            app.params.mto = true;
+            assert(t.prompt().indexOf('点按图形选择') >= 0, '未选中时应提示选择元素');
+            t.applyParams();
+            assert(app.toasts.join('').indexOf('请先选中') >= 0, '未选中时确定应提示');
+
+            const l = app.model.add(line(0, 0, 100, 0));
+            t.onTap({ x: 50, y: 0 });
+            assert(app.model.selected.size === 1, '点按图形应选中');
+            assert(t.prompt().indexOf('基准点') >= 0, '选中后应提示拾取基准点');
+
+            // 点击拾取基准点（走吸附）
+            let snapCalls = 0;
+            const rawSnap = app.snapPoint;
+            app.snapPoint = function (p) { snapCalls++; return rawSnap.call(this, p); };
+            t.onTap({ x: 50, y: 0 });
+            assert(t.mtoBase && Math.abs(t.mtoBase.x - 50) < 1e-9 && Math.abs(t.mtoBase.y) < 1e-9, '点击拾取基准点');
+            assert(snapCalls === 1, '基准点拾取应经过吸附');
+            assert(t.prompt().indexOf('点按目标位置') >= 0, '基准点后应提示点按目标或输入坐标');
+
+            // 坐标输入目标
+            app.params.tx = 200;
+            app.params.ty = 50;
+            t.applyParams();
+            near(l.p1.x, 150, 1e-9, '坐标目标后基准点对齐 X');
+            near(l.p1.y, 50, 1e-9, '坐标目标后基准点对齐 Y');
+            assert(t.mtoBase === null, '移动后基准点应复位');
+
+            // 点击目标位置
+            t.onTap({ x: 150, y: 50 });
+            assert(t.mtoBase !== null, '再次点击应拾取新的基准点');
+            t.onTap({ x: 0, y: 0 });
+            near(l.p1.x, 0, 1e-9, '点击目标后起点 X');
+            near(l.p1.y, 0, 1e-9, '点击目标后起点 Y');
+            assert(t.mtoBase === null, '点击目标完成后基准点复位');
+            assert(Number(app.params.tx) === 0 && Number(app.params.ty) === 0, '点击目标应回填目标坐标');
+
+            // 点按其它元素切换选中（圆按轮廓拾取，点圆周）
+            const c = app.model.add(circle(500, 0, 20));
+            t.onTap({ x: 520, y: 0 });
+            assert(app.model.selected.has(c.id) && !app.model.selected.has(l.id), '点按其它元素应切换选中');
+            t.onTap({ x: 500, y: 0 });
+            t.onTap({ x: 600, y: 100 });
+            near(c.c.x, 600, 1e-9, '圆心点击目标 X');
+            near(c.c.y, 100, 1e-9, '圆心点击目标 Y');
+            assert(app.model.count() === 2, '移动到不应改变图元数量');
+            assert(app.undo.length > 0, '每次移动应记录撤销');
+          }
+        },
+        {
+          name: '平移工具：移动到边界（非法输入 / 超大坐标 / 模式切换）',
+          run: function () {
+            const app = mockApp();
+            const t = useTool('move');
+            app.params.mto = true;
+            const l = app.model.add(line(0, 0, 100, 0));
+            app.model.selected.add(l.id);
+
+            // 未拾取基准点：拒绝移动
+            app.params.tx = 10;
+            app.params.ty = 10;
+            t.applyParams();
+            assert(app.toasts.join('').indexOf('点选基准点') >= 0, '未拾取基准点应提示');
+            near(l.p1.x, 0, 1e-9, '未拾取基准点时不应移动');
+
+            // 基准点可在元素外自由拾取；目标与基准点重合时不移动
+            t.mtoBase = { x: -50, y: -20 };
+            app.params.tx = -50;
+            app.params.ty = -20;
+            t.applyParams();
+            assert(app.toasts.join('').indexOf('已在目标位置') >= 0, '基准点已在目标位置应提示');
+            assert(t.mtoBase !== null, '原地未移动时应保留基准点');
+
+            // 空目标坐标
+            app.params.tx = '';
+            t.applyParams();
+            assert(app.toasts.join('').indexOf('请输入目标坐标') >= 0, '空目标坐标应提示');
+
+            // 负坐标
+            app.params.tx = -250.5;
+            app.params.ty = -500.25;
+            t.applyParams();
+            near(l.p1.x, -200.5, 1e-9, '负目标 X 位移精确');
+            near(l.p1.y, -480.25, 1e-9, '负目标 Y 位移精确');
+
+            // 超大坐标
+            t.mtoBase = { x: l.p2.x, y: l.p2.y };
+            app.params.tx = 1e9;
+            app.params.ty = -1e9;
+            t.applyParams();
+            near(l.p2.x, 1e9, 1e-6, '超大目标 X 精确');
+            near(l.p2.y, -1e9, 1e-6, '超大目标 Y 精确');
+
+            // 复位与模式切换清除基准点
+            t.mtoBase = { x: 1, y: 2 };
+            t.reset();
+            assert(t.mtoBase === null, 'reset 应清除基准点');
+            t.mtoBase = { x: 1, y: 2 };
+            t.onParamChange('mto');
+            assert(t.mtoBase === null, '切换移动方式应清除基准点');
+
+            // 关闭「移动到」后仍走原偏移逻辑
+            app.params.mto = false;
+            app.params.mx = 10;
+            app.params.my = 0;
+            const oldX = l.p1.x;
+            t.applyParams();
+            near(l.p1.x, oldX + 10, 1e-9, '关闭后恢复 X/Y 偏移平移');
+
+            // 移动到模式下拖动只平移视图，不移动图形
+            app.params.mto = true;
+            t.reset();
+            const undoBefore = app.undo.length;
+            const shapeBefore = { x: l.p1.x, y: l.p1.y };
+            t.onDragStart({ x: 0, y: 0 });
+            assert(t.panning === true && !t.active, '移动到模式拖动应平移视图');
+            t.onDragEnd();
+            assert(t.panning === false, '拖动结束应退出视图平移');
+            assert(app.undo.length === undoBefore, '拖动不应产生移动撤销记录');
+            near(l.p1.x, shapeBefore.x, 1e-9, '拖动不应改变图形位置');
+          }
+        },
+        {
           name: '直线工具：正交锁定 0/90/180/270',
           run: function () {
             const app = mockApp();
@@ -1305,14 +1440,18 @@
             near(t.points[0].x, 40, 1e-9, '新起点 = 上一条终点 X');
             near(t.points[0].y, 60, 1e-9, '新起点 = 上一条终点 Y');
             near(Number(app.params.x1), 40, 1e-9, '起点参数同步为上一条终点');
+            assert(Number(app.params.x2) === 0 && Number(app.params.y2) === 0, '生成后终点输入应自动清零');
 
+            app.params.x2 = 30;
+            app.params.y2 = 40;
             t.applyParams();
             assert(app.model.count() === 2, '应生成第二条直线');
             const l2 = app.model.entities[1];
             near(l2.p1.x, 40, 1e-9, '第二条起点衔接第一条终点');
             near(l2.p1.y, 60, 1e-9);
-            near(l2.p2.x, 70, 1e-9, '第二条沿用增量 ΔX');
-            near(l2.p2.y, 100, 1e-9, '第二条沿用增量 ΔY');
+            near(l2.p2.x, 70, 1e-9, '输入增量后第二条按新增量生成');
+            near(l2.p2.y, 100, 1e-9);
+            assert(Number(app.params.x2) === 0 && Number(app.params.y2) === 0, '第二条生成后同样清零');
 
             app.params.cmode = 'abs';
             app.params.x2 = -50;
@@ -1323,7 +1462,7 @@
             near(l3.p1.x, 70, 1e-9, '绝对模式起点仍为上一终点');
             near(l3.p2.x, -50, 1e-9, '绝对模式终点 X');
             near(l3.p2.y, 0, 1e-9, '绝对模式终点 Y');
-            near(Number(app.params.x2), -170, 1e-9, '绝对模式下一段终点按相同增量平移');
+            assert(Number(app.params.x2) === 0 && Number(app.params.y2) === 0, '绝对模式生成后终点输入清零');
 
             // 终点与起点重合时拒绝生成
             app.params.x2 = -50;
