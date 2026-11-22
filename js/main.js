@@ -13,7 +13,8 @@
 
   /* 功能扩展开关：关闭时隐藏不常用绘图工具与全部约束功能 */
   const EXT_KEY = 'cad.ext.enabled';
-  const EXT_HIDE_DRAW = { rect: true, poly: true, arc: true, offset: true };
+  const EXT_HIDE_DRAW = { rect: true, poly: true, arc: true, offset: true, contour: true, spline: true };
+  const EXT_HIDE_EDIT = { splineEdit: true };
   let extEnabled = false;
   let currentTab = 'edit';
   try { extEnabled = localStorage.getItem(EXT_KEY) === '1'; } catch (e) { extEnabled = false; }
@@ -96,6 +97,11 @@
         pts.forEach(function (q) { consider(q, '端点'); });
         for (let i = 0; i < count; i++) {
           consider(Geo.lerp(pts[i], pts[(i + 1) % pts.length], 0.5), '中点');
+        }
+      } else if (e.type === 'spline') {
+        (e.pts || []).forEach(function (q) { consider(q, '节点'); });
+        if (e.pts && e.pts.length > 1) {
+          consider(Geo.entityMidpoint(e), '中点');
         }
       } else if (e.type === 'point') {
         consider(e.p, '点');
@@ -271,7 +277,8 @@
       item.appendChild(sw);
       bar.appendChild(item);
     });
-    bar.classList.remove('hidden');
+    // 展开操作面板时隐藏快捷开关行，收起时恢复显示
+    bar.classList.toggle('hidden', !!App.paramsOpen);
   }
 
   App.updateParams = function () {
@@ -410,9 +417,11 @@
       box.appendChild(fw);
       row.appendChild(box);
     });
-    // 无可见数值项时（如直线关闭“坐标输入”）不显示“确定”，避免用默认值误建图形
+    // 无可见数值项时（如直线关闭“坐标输入”）不显示“确定”，避免用默认值误建图形；
+    // 选择 / 开关类字段可通过 apply:true 显式声明需要提交按钮
     const hasNumber = fields.some(function (fd) { return !fd.type || fd.type === 'number'; });
-    if (hasNumber && typeof App.tool.applyParams === 'function') {
+    const needsApply = hasNumber || fields.some(function (fd) { return fd.apply === true; });
+    if (needsApply && typeof App.tool.applyParams === 'function') {
       const btn = document.createElement('button');
       btn.className = 'param-apply';
       btn.textContent = '确定';
@@ -443,6 +452,8 @@
     if (!row || !tg || tg.classList.contains('hidden')) return;
     App.paramsOpen = typeof force === 'boolean' ? force : !App.paramsOpen;
     row.classList.toggle('hidden', !App.paramsOpen);
+    const swBar = $('quickSwitchRow');
+    if (swBar) swBar.classList.toggle('hidden', !!App.paramsOpen || swBar.children.length === 0);
     tg.classList.toggle('open', !!App.paramsOpen);
     tg.setAttribute('aria-expanded', App.paramsOpen ? 'true' : 'false');
     tg.setAttribute('aria-label', App.paramsOpen ? '折叠操作选项' : '展开操作选项');
@@ -479,7 +490,7 @@
   }
 
   function propsHtml(ent) {
-    const names = { line: '直线', circle: '圆', arc: '圆弧', point: '点', rect: '矩形', poly: '多边形' };
+    const names = { line: '直线', circle: '圆', arc: '圆弧', point: '点', rect: '矩形', poly: '多边形', spline: '样条线' };
     let html = '<div class="row"><span class="k">类型</span><span class="v">' + (names[ent.type] || ent.type) + '</span></div>';
     if (ent.type === 'line') {
       html += propInput('起点 X', 'x1', ent.p1.x) + propInput('起点 Y', 'y1', ent.p1.y);
@@ -683,7 +694,7 @@
   };
 
   App.entityInfo = function (ent, withId) {
-    const names = { line: '直线', circle: '圆', arc: '圆弧', point: '点', rect: '矩形', poly: '多边形' };
+    const names = { line: '直线', circle: '圆', arc: '圆弧', point: '点', rect: '矩形', poly: '多边形', spline: '样条线' };
     function row(k, v) {
       return '<div class="row"><span class="k">' + k + '</span><span class="v">' + v + '</span></div>';
     }
@@ -1386,8 +1397,7 @@
     const row = $('toolRow');
     row.innerHTML = '';
     Tools.list.filter(function (t) {
-      if (t.cat !== tab) return false;
-      return extEnabled || !(t.cat === 'constraint' || (t.cat === 'draw' && EXT_HIDE_DRAW[t.id]));
+      return t.cat === tab && toolVisible(t);
     }).forEach(function (t) {
       const b = document.createElement('button');
       b.className = 'tool-chip';
@@ -1409,11 +1419,14 @@
   function toolVisible(t) {
     if (!t) return true;
     if (extEnabled) return true;
-    return !(t.cat === 'constraint' || (t.cat === 'draw' && EXT_HIDE_DRAW[t.id]));
+    if (t.cat === 'constraint') return false;
+    if (t.cat === 'draw' && EXT_HIDE_DRAW[t.id]) return false;
+    if (t.cat === 'edit' && EXT_HIDE_EDIT[t.id]) return false;
+    return true;
   }
 
-  /** 同步功能扩展开关的界面表现；animate=true 时先淡出工具栏再重排，避免布局跳动 */
-  function syncExtUI(animate) {
+  /** 同步功能扩展开关的界面表现；切换后立即重排工具栏，避免状态延迟 */
+  function syncExtUI() {
     const cb = $('extToggle');
     if (cb) cb.checked = extEnabled;
     const tabBtn = document.querySelector('#tabs .tab[data-tab="constraint"]');
@@ -1425,13 +1438,7 @@
       });
     }
     if (!extEnabled && App.tool && !toolVisible(App.tool)) App.setTool('select');
-    if (!animate) { renderToolRow(currentTab); return; }
-    const dock = $('dock');
-    dock.classList.add('switching');
-    setTimeout(function () {
-      renderToolRow(currentTab);
-      dock.classList.remove('switching');
-    }, 180);
+    renderToolRow(currentTab);
   }
 
   document.querySelectorAll('#viewDock .vbtn[data-view]').forEach(function (btn) {
@@ -1459,7 +1466,7 @@
     extEnabled = this.checked;
     try { localStorage.setItem(EXT_KEY, extEnabled ? '1' : '0'); } catch (e) {}
     closeMenu();
-    syncExtUI(true);
+    syncExtUI();
     App.toast(extEnabled ? '已开启功能扩展' : '已隐藏不常用功能');
   });
   $('scriptClose').addEventListener('click', function () { scriptModal.classList.add('hidden'); });
@@ -1526,7 +1533,207 @@
     App.showConstraintList();
     App.toast(isAngle ? '角度约束已更新' : isOverlap ? '重叠比例已更新' : '距离约束已更新');
   });
-  $('helpClose').addEventListener('click', function () { $('helpModal').classList.add('hidden'); });
+  /* ---------------- 操作说明：折叠卡片 + 详情弹窗 ---------------- */
+  const HELP_TOPICS = (function () {
+    const body = document.querySelector('#helpModal .help-body');
+    const topics = [];
+    if (!body) return topics;
+    let cur = null;
+    Array.prototype.slice.call(body.childNodes).forEach(function (node) {
+      if (node.nodeType === 1 && node.tagName === 'P' &&
+          node.children.length === 1 && node.firstElementChild &&
+          node.firstElementChild.tagName === 'B') {
+        cur = { title: node.textContent.trim(), html: '' };
+        topics.push(cur);
+        return;
+      }
+      if (!cur) return;
+      if (node.nodeType === 1) cur.html += node.outerHTML;
+      else if (node.nodeType === 3 && node.textContent.trim()) {
+        cur.html += '<p>' + node.textContent.trim() + '</p>';
+      }
+    });
+    return topics;
+  })();
+
+  const HELP_META = window.CAD_HELP_META || {};
+
+  function escHtml(s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+  }
+
+  function helpMetaOf(topic) {
+    const m = HELP_META[topic.title] || {};
+    const plain = topic.html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    return {
+      summary: m.summary || (plain.slice(0, 46) + (plain.length > 46 ? '…' : '')),
+      scenes: m.scenes || [],
+      notes: m.notes || []
+    };
+  }
+
+  function renderHelpCards() {
+    const body = document.querySelector('#helpModal .help-body');
+    if (!body || !HELP_TOPICS.length) return;
+    body.innerHTML = '';
+    body.classList.add('help-cards');
+    HELP_TOPICS.forEach(function (t, i) {
+      const meta = helpMetaOf(t);
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.className = 'help-card';
+      card.dataset.helpIndex = String(i);
+      card.innerHTML =
+        '<span class="help-card-title">' + escHtml(t.title) + '</span>' +
+        '<span class="help-card-summary">' + escHtml(meta.summary) + '</span>' +
+        '<span class="help-card-more">查看详情</span>';
+      body.appendChild(card);
+    });
+  }
+
+  function openHelpDetail(i) {
+    const t = HELP_TOPICS[i];
+    if (!t) return;
+    const meta = helpMetaOf(t);
+    let html = '<div class="help-sec"><div class="help-sec-title">功能描述</div>' +
+      '<div class="help-sec-body">' + t.html + '</div></div>';
+    if (meta.scenes.length) {
+      html += '<div class="help-sec"><div class="help-sec-title">使用场景</div>' +
+        '<div class="help-sec-body"><ul>' + meta.scenes.map(function (s) {
+          return '<li>' + escHtml(s) + '</li>';
+        }).join('') + '</ul></div></div>';
+    }
+    if (meta.notes.length) {
+      html += '<div class="help-sec"><div class="help-sec-title">注意事项</div>' +
+        '<div class="help-sec-body"><ul>' + meta.notes.map(function (s) {
+          return '<li>' + escHtml(s) + '</li>';
+        }).join('') + '</ul></div></div>';
+    }
+    $('helpDetailTitle').textContent = t.title;
+    const body = $('helpDetailBody');
+    body.innerHTML = html;
+    body.scrollTop = 0;
+    $('helpDetail').classList.remove('hidden');
+  }
+
+  function closeHelpDetail() { $('helpDetail').classList.add('hidden'); }
+
+  function topicIndexByTitle(title) {
+    for (let i = 0; i < HELP_TOPICS.length; i++) {
+      if (HELP_TOPICS[i].title === title) return i;
+    }
+    return -1;
+  }
+
+  function openHelpDetailByTitle(title) {
+    const i = topicIndexByTitle(title);
+    if (i >= 0) openHelpDetail(i);
+  }
+
+  /** 点击画布左上角功能徽标：展示当前功能对应的完整说明、步骤与注意事项 */
+  function openFeatureHelp(toolId) {
+    const tool = window.CADTools && window.CADTools.byId ? window.CADTools.byId(toolId) : null;
+    const map = window.CAD_FEATURE_HELP || {};
+    const entry = map[toolId] || null;
+    const topicTitle = entry && entry.topic ? entry.topic : '基本手势';
+    let idx = topicIndexByTitle(topicTitle);
+    if (idx < 0) idx = topicIndexByTitle('基本手势');
+    const t = idx >= 0 ? HELP_TOPICS[idx] : null;
+    if (!t) return;
+    const meta = helpMetaOf(t);
+    let html = '<div class="help-sec"><div class="help-sec-title">功能描述</div>' +
+      '<div class="help-sec-body">' + t.html + '</div></div>';
+    if (entry && entry.steps && entry.steps.length) {
+      html += '<div class="help-sec"><div class="help-sec-title">操作步骤</div>' +
+        '<div class="help-sec-body"><ol>' + entry.steps.map(function (s) {
+          return '<li>' + escHtml(s) + '</li>';
+        }).join('') + '</ol></div></div>';
+    }
+    if (meta.scenes.length) {
+      html += '<div class="help-sec"><div class="help-sec-title">使用场景</div>' +
+        '<div class="help-sec-body"><ul>' + meta.scenes.map(function (s) {
+          return '<li>' + escHtml(s) + '</li>';
+        }).join('') + '</ul></div></div>';
+    }
+    if (meta.notes.length) {
+      html += '<div class="help-sec"><div class="help-sec-title">注意事项</div>' +
+        '<div class="help-sec-body"><ul>' + meta.notes.map(function (s) {
+          return '<li>' + escHtml(s) + '</li>';
+        }).join('') + '</ul></div></div>';
+    }
+    if (entry && entry.related && entry.related.length) {
+      const links = entry.related.filter(function (title) { return topicIndexByTitle(title) >= 0; });
+      if (links.length) {
+        html += '<div class="help-sec"><div class="help-sec-title">相关指引</div>' +
+          '<div class="help-sec-body"><div class="help-links">' + links.map(function (title) {
+            return '<button type="button" class="help-link" data-help-topic="' + escHtml(title) + '">' +
+              escHtml(title) + '</button>';
+          }).join('') + '</div></div></div>';
+      }
+    }
+    $('helpDetailTitle').textContent = tool ? tool.name : t.title;
+    const body = $('helpDetailBody');
+    body.innerHTML = html;
+    body.scrollTop = 0;
+    $('helpDetail').classList.remove('hidden');
+  }
+
+  renderHelpCards();
+  document.querySelector('#helpModal .help-body').addEventListener('click', function (e) {
+    const card = e.target.closest ? e.target.closest('.help-card') : null;
+    if (!card) return;
+    openHelpDetail(Number(card.dataset.helpIndex));
+  });
+  $('helpDetailClose').addEventListener('click', closeHelpDetail);
+  $('helpDetail').addEventListener('click', function (e) {
+    if (e.target.id === 'helpDetail') closeHelpDetail();
+  });
+  $('helpDetailBody').addEventListener('click', function (e) {
+    const link = e.target.closest ? e.target.closest('.help-link') : null;
+    if (!link || !link.dataset.helpTopic) return;
+    openHelpDetailByTitle(link.dataset.helpTopic);
+  });
+  $('helpModal').addEventListener('click', function (e) {
+    if (e.target.id === 'helpModal') $('helpModal').classList.add('hidden');
+  });
+  $('helpClose').addEventListener('click', function () {
+    closeHelpDetail();
+    $('helpModal').classList.add('hidden');
+  });
+
+  /* 左上角功能徽标：点击查看当前功能的完整使用说明 */
+  const toolBadge = $('toolBadge');
+  if (toolBadge) {
+    toolBadge.setAttribute('role', 'button');
+    toolBadge.setAttribute('tabindex', '0');
+    toolBadge.setAttribute('title', '点击查看当前功能说明');
+    toolBadge.addEventListener('click', function () {
+      if (App.tool && App.tool.id) openFeatureHelp(App.tool.id);
+    });
+    toolBadge.addEventListener('keydown', function (e) {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.preventDefault();
+      if (App.tool && App.tool.id) openFeatureHelp(App.tool.id);
+    });
+  }
+
+  /* ESC：优先关闭功能说明详情，其次关闭说明列表 */
+  window.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    const detail = $('helpDetail');
+    const modal = $('helpModal');
+    if (detail && !detail.classList.contains('hidden')) {
+      e.preventDefault();
+      e.stopPropagation();
+      closeHelpDetail();
+    } else if (modal && !modal.classList.contains('hidden')) {
+      e.preventDefault();
+      e.stopPropagation();
+      modal.classList.add('hidden');
+    }
+  }, true);
   $('btnSelDelete').addEventListener('click', function () {
     if (!App.model.selected.size) return;
     App.begin();
@@ -1570,7 +1777,7 @@
         App.refresh();
       } else if (act === 'export') exportJSON();
       else if (act === 'import') $('importFile').click();
-      else if (act === 'help') { closeMenu(); $('helpModal').classList.remove('hidden'); }
+      else if (act === 'help') { closeMenu(); closeHelpDetail(); $('helpModal').classList.remove('hidden'); }
       else if (act === 'test') { window.location.href = 'test.html'; }
       else if (act === 'clear') { closeMenu(); clearAll(); }
       else if (act === 'close') closeMenu();
@@ -1581,7 +1788,10 @@
     if (e.target.id === 'scriptModal') scriptModal.classList.add('hidden');
   });
   $('helpModal').addEventListener('click', function (e) {
-    if (e.target.id === 'helpModal') $('helpModal').classList.add('hidden');
+    if (e.target.id === 'helpModal') {
+      closeHelpDetail();
+      $('helpModal').classList.add('hidden');
+    }
   });
 
   window.addEventListener('resize', resize);
@@ -1595,7 +1805,7 @@
   document.querySelectorAll('#tabs .tab').forEach(function (b) {
     b.classList.toggle('active', b.dataset.tab === 'edit');
   });
-  syncExtUI(false);
+  syncExtUI();
   App.setTool('select');
   App.zoomFit();
   updateHistoryUI();

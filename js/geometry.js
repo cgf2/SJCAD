@@ -152,10 +152,89 @@
     return segs;
   }
 
+  /* ---------- 贝塞尔样条 ---------- */
+  function bezierPoint(c, t) {
+    const mt = 1 - t;
+    const a = mt * mt * mt, b = 3 * mt * mt * t, cc = 3 * mt * t * t, d = t * t * t;
+    return P(a * c.p0.x + b * c.p1.x + cc * c.p2.x + d * c.p3.x,
+      a * c.p0.y + b * c.p1.y + cc * c.p2.y + d * c.p3.y);
+  }
+
+  /** 样条节点控制柄：显式 handles 优先，否则按 Catmull-Rom 自动推导 */
+  function splineControls(ent) {
+    const pts = ent.pts || [];
+    const n = pts.length;
+    const closed = !!ent.closed;
+    let s = typeof ent.smooth === 'number' ? clamp(ent.smooth, 0, 1) : 0.5;
+    if (!(n > 0)) return [];
+    const k = s / 6;
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const p = pts[i];
+      const h = ent.handles && ent.handles[i];
+      if (h && h.in && h.out) {
+        out.push({ p: cloneP(p), in: cloneP(h.in), out: cloneP(h.out) });
+        continue;
+      }
+      let prev, next;
+      if (closed) {
+        prev = pts[(i - 1 + n) % n];
+        next = pts[(i + 1) % n];
+      } else {
+        prev = pts[Math.max(0, i - 1)];
+        next = pts[Math.min(n - 1, i + 1)];
+      }
+      const tv = sub(next, prev);
+      out.push({
+        p: cloneP(p),
+        in: P(p.x - tv.x * k, p.y - tv.y * k),
+        out: P(p.x + tv.x * k, p.y + tv.y * k)
+      });
+    }
+    return out;
+  }
+
+  /** 样条拆成逐段三次贝塞尔曲线 */
+  function splineCurves(ent) {
+    const nodes = splineControls(ent);
+    const n = nodes.length;
+    if (n < 2) return [];
+    const closed = !!ent.closed;
+    const count = closed ? n : n - 1;
+    const curves = [];
+    for (let i = 0; i < count; i++) {
+      const a = nodes[i], b = nodes[(i + 1) % n];
+      curves.push({ p0: cloneP(a.p), p1: cloneP(a.out), p2: cloneP(b.in), p3: cloneP(b.p) });
+    }
+    return curves;
+  }
+
+  /** 样条按段采样为折线；segs 为总采样段数（近似） */
+  function splinePolyline(ent, segs) {
+    const curves = splineCurves(ent);
+    if (!curves.length) return polyPoints(ent);
+    const per = Math.max(6, Math.ceil((segs || 64) / curves.length));
+    const out = [];
+    curves.forEach(function (c, ci) {
+      for (let i = 0; i <= per; i++) {
+        if (ci > 0 && i === 0) continue;
+        out.push(bezierPoint(c, i / per));
+      }
+    });
+    return out;
+  }
+
+  /** 轮廓闭合检测：首尾点距离不超过 tol 视为可闭合 */
+  function contourClosure(pts, tol) {
+    if (!pts || pts.length < 3) return false;
+    return dist(pts[0], pts[pts.length - 1]) <= (tol > 0 ? tol : 1e-6);
+  }
+
   function entityPolyline(ent, segs) {
     segs = segs || 64;
     if (ent.type === 'line') return [cloneP(ent.p1), cloneP(ent.p2)];
     if (ent.type === 'point') return [cloneP(ent.p)];
+    if (ent.type === 'spline') return splinePolyline(ent, Math.max(segs, 48));
     if (isPolyLike(ent)) return closedPoints(ent);
     if (ent.type === 'circle') {
       const out = [];
@@ -181,6 +260,7 @@
     if (ent.type === 'arc') return [arcStart(ent), arcEnd(ent)];
     if (ent.type === 'rect') return rectPoints(ent);
     if (ent.type === 'poly') return polyPoints(ent);
+    if (ent.type === 'spline') return polyPoints(ent);
     return [];
   }
 
@@ -197,6 +277,7 @@
     if (ent.type === 'arc') return arcSweep(ent) * ent.r;
     if (ent.type === 'rect') return 2 * ((ent.x2 - ent.x1) + (ent.y2 - ent.y1));
     if (ent.type === 'poly') return polylineLength(polyPoints(ent), ent.closed !== false);
+    if (ent.type === 'spline') return polylineLength(splinePolyline(ent, 120), false);
     return 0;
   }
 
@@ -211,6 +292,21 @@
     if (isPolyLike(ent)) {
       const b = entityBBox(ent);
       return P((b.x1 + b.x2) / 2, (b.y1 + b.y2) / 2);
+    }
+    if (ent.type === 'spline') {
+      const pts = splinePolyline(ent, 96);
+      if (!pts.length) return P(0, 0);
+      const total = polylineLength(pts, false);
+      let acc = 0;
+      for (let i = 1; i < pts.length; i++) {
+        const d = dist(pts[i - 1], pts[i]);
+        if (acc + d >= total / 2) {
+          const t = d > EPS ? (total / 2 - acc) / d : 0;
+          return lerp(pts[i - 1], pts[i], t);
+        }
+        acc += d;
+      }
+      return cloneP(pts[pts.length - 1]);
     }
     return P(0, 0);
   }
@@ -236,6 +332,7 @@
     }
     if (ent.type === 'rect') return polyHitDistance(rectPoints(ent), true, p);
     if (ent.type === 'poly') return polyHitDistance(polyPoints(ent), ent.closed !== false, p);
+    if (ent.type === 'spline') return polyHitDistance(splinePolyline(ent, 96), false, p);
     return Infinity;
   }
 
@@ -272,8 +369,14 @@
       ent.x1 += dx; ent.x2 += dx; ent.y1 += dy; ent.y2 += dy;
       return ent;
     }
-    if (ent.type === 'poly' && ent.pts) {
+    if ((ent.type === 'poly' || ent.type === 'spline') && ent.pts) {
       ent.pts.forEach(function (q) { q.x += dx; q.y += dy; });
+      if (ent.type === 'spline' && ent.handles) {
+        ent.handles.forEach(function (h) {
+          if (h && h.in) { h.in.x += dx; h.in.y += dy; }
+          if (h && h.out) { h.out.x += dx; h.out.y += dy; }
+        });
+      }
       return ent;
     }
     if (ent.p1) { ent.p1.x += dx; ent.p1.y += dy; }
@@ -304,8 +407,17 @@
       }
       return ent;
     }
-    if (ent.type === 'poly') {
+    if (ent.type === 'poly' || ent.type === 'spline') {
       ent.pts = (ent.pts || []).map(function (q) { return rotatePoint(q, base, ang); });
+      if (ent.type === 'spline' && ent.handles) {
+        ent.handles = ent.handles.map(function (h) {
+          if (!h) return h;
+          return {
+            in: h.in ? rotatePoint(h.in, base, ang) : h.in,
+            out: h.out ? rotatePoint(h.out, base, ang) : h.out
+          };
+        });
+      }
       return ent;
     }
     ['p1', 'p2', 'p', 'c'].forEach(function (k) {
@@ -323,6 +435,14 @@
     } else if (src.type === 'poly') {
       target.pts = (src.pts || []).map(cloneP);
       target.closed = src.closed !== false;
+      delete target.x1; delete target.y1; delete target.x2; delete target.y2;
+    } else if (src.type === 'spline') {
+      target.pts = (src.pts || []).map(cloneP);
+      target.handles = (src.handles || []).map(function (h) {
+        return h ? { in: h.in ? cloneP(h.in) : null, out: h.out ? cloneP(h.out) : null } : null;
+      });
+      target.smooth = typeof src.smooth === 'number' ? src.smooth : 0.5;
+      target.closed = !!src.closed;
       delete target.x1; delete target.y1; delete target.x2; delete target.y2;
     } else {
       ['p1', 'p2', 'p', 'c'].forEach(function (k) {
@@ -650,6 +770,16 @@
       return function (p) { return angleOnArc(angleOf(ent.c, p), ent); };
     };
 
+    // 样条按采样折线拆成线段后逐对求交
+    if (a.type === 'spline' || b.type === 'spline') {
+      const sa = a.type === 'spline' ? polySegments({ type: 'poly', pts: splinePolyline(a, 96), closed: false }) : [a];
+      const sb = b.type === 'spline' ? polySegments({ type: 'poly', pts: splinePolyline(b, 96), closed: false }) : [b];
+      sa.forEach(function (x) {
+        sb.forEach(function (y) { push(intersections(x, y)); });
+      });
+      return out;
+    }
+
     // 矩形 / 多边形按边拆成线段后逐对求交
     if (isPolyLike(a) || isPolyLike(b)) {
       const ea = isPolyLike(a) ? polySegments(a) : [a];
@@ -849,6 +979,20 @@
       }
       return out;
     }
+    if (ent.type === 'spline') {
+      return {
+        type: 'spline',
+        pts: (ent.pts || []).map(function (q) { return mirrorPoint(q, a, b); }),
+        handles: (ent.handles || []).map(function (h) {
+          return h ? {
+            in: h.in ? mirrorPoint(h.in, a, b) : null,
+            out: h.out ? mirrorPoint(h.out, a, b) : null
+          } : null;
+        }),
+        smooth: typeof ent.smooth === 'number' ? ent.smooth : 0.5,
+        closed: !!ent.closed
+      };
+    }
     return null;
   }
 
@@ -940,6 +1084,8 @@
     isCircleLike: isCircleLike,
     isPolyLike: isPolyLike, rectPoints: rectPoints, polyPoints: polyPoints,
     polySegments: polySegments, polyArea: polyArea,
+    splineControls: splineControls, splineCurves: splineCurves,
+    splinePolyline: splinePolyline, bezierPoint: bezierPoint, contourClosure: contourClosure,
     entityPolyline: entityPolyline, entityEndpoints: entityEndpoints,
     entityLength: entityLength, entityMidpoint: entityMidpoint,
     hitDistance: hitDistance, entityBBox: entityBBox, bboxOf: bboxOf,

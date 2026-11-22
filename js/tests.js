@@ -3312,6 +3312,482 @@
           }
         }
       ]
+    },
+    {
+      name: '轮廓线与样条线',
+      cases: [
+        {
+          name: '样条采样 / 长度 / 包围盒 / 中点',
+          run: function () {
+            const s = { type: 'spline', pts: [{ x: 0, y: 0 }, { x: 50, y: 60 }, { x: 100, y: 0 }], smooth: 0.5, closed: false };
+            const pts = Geo.splinePolyline(s, 48);
+            assert(pts.length > 10, '样条应采样出足够多的点');
+            near(pts[0].x, 0, 1e-9, '采样起点 X');
+            near(pts[0].y, 0, 1e-9, '采样起点 Y');
+            near(pts[pts.length - 1].x, 100, 1e-9, '采样终点 X');
+            near(pts[pts.length - 1].y, 0, 1e-9, '采样终点 Y');
+            const len = Geo.entityLength(s);
+            assert(len > 156.2, '曲线长度应大于折线弦长，实际 ' + len);
+            const b = Geo.entityBBox(s);
+            assert(b.x1 >= -1e-9 && b.x2 <= 100 + 1e-9, '包围盒 X 范围');
+            assert(b.y2 > 30 && b.y2 <= 60 + 1e-9, '包围盒 Y 上限');
+            const mid = Geo.entityMidpoint(s);
+            near(mid.x, 50, 1e-6, '对称样条中点 X');
+            const sp = pts[Math.floor(pts.length / 2)];
+            near(Geo.hitDistance(s, sp), 0, 1e-6, '采样点应落在样条上');
+            assert(Geo.splineCurves(s).length === 2, '3 个节点应生成 2 段曲线');
+          }
+        },
+        {
+          name: '样条交点识别与闭合',
+          run: function () {
+            const s = { type: 'spline', pts: [{ x: 0, y: 0 }, { x: 50, y: 60 }, { x: 100, y: 0 }], smooth: 0.5, closed: false };
+            const hits = Geo.intersections(s, line(-10, 30, 110, 30));
+            assert(hits.length >= 2, '样条与水平线应至少识别 2 个交点，实际 ' + hits.length);
+            hits.forEach(function (p) { near(p.y, 30, 1e-6, '交点应落在直线上'); });
+            const closed = { type: 'spline', pts: [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 50, y: 80 }], smooth: 0.5, closed: true };
+            assert(Geo.splineCurves(closed).length === 3, '闭合样条应包含收尾段');
+            const cp = Geo.splinePolyline(closed, 60);
+            near(Geo.dist(cp[0], cp[cp.length - 1]), 0, 1e-6, '闭合样条首尾应重合');
+          }
+        },
+        {
+          name: '样条平移 / 镜像 / 复制独立',
+          run: function () {
+            const s = { type: 'spline', pts: [{ x: 0, y: 0 }, { x: 50, y: 20 }, { x: 100, y: 0 }], smooth: 0.4, closed: false };
+            Geo.translateEntity(s, 10, -5);
+            near(s.pts[1].x, 60, 1e-9, '平移后节点 X');
+            near(s.pts[1].y, 15, 1e-9, '平移后节点 Y');
+            const m = Geo.mirrorEntity(s, { x: 0, y: 0 }, { x: 0, y: 10 });
+            assert(m && m.type === 'spline', '样条应支持镜像');
+            near(m.pts[1].x, -60, 1e-9, '镜像后节点 X 取反');
+            near(m.pts[1].y, 15, 1e-9, '镜像后节点 Y 不变');
+            const copy = Geo.copyShape({}, s);
+            copy.pts[0].x = 999;
+            near(s.pts[0].x, 10, 1e-9, '复制后修改不应影响原样条');
+            assert(Geo.contourClosure([{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 0, y: 0.4 }], 0.5), '首尾在容差内应判定闭合');
+            assert(!Geo.contourClosure([{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 0, y: 5 }], 0.5), '首尾超差不应闭合');
+            assert(!Geo.contourClosure([{ x: 0, y: 0 }, { x: 10, y: 0 }], 100), '少于 3 点不应闭合');
+          }
+        },
+        {
+          name: '轮廓线工具：开放 / 自动闭合 / 节点增删',
+          run: function () {
+            const app = mockApp();
+            app.params.cmode = 'draw';
+            app.params.cend = 'open';
+            const t = useTool('contour');
+            t.onTap({ x: 0, y: 0 });
+            t.onTap({ x: 100, y: 0 });
+            t.onTap({ x: 100, y: 100 });
+            t.applyParams();
+            assert(app.model.count() === 1, '应生成 1 条开放轮廓');
+            const e = app.model.entities[0];
+            assert(e.type === 'poly' && e.closed === false, '开放轮廓应为非闭合 poly');
+            assert(e.pts.length === 3, '节点数量应为 3');
+
+            // 点回起点闭合
+            app.params.cend = 'auto';
+            t.onTap({ x: 0, y: 0 });
+            t.onTap({ x: 80, y: 0 });
+            t.onTap({ x: 80, y: 60 });
+            t.onTap({ x: 1, y: 1 });
+            assert(app.model.count() === 2, '点回起点附近应完成闭合轮廓');
+            assert(app.model.entities[1].closed === true, '自动检测应生成闭合轮廓');
+
+            // 编辑：线段插点 + 再次点按删除
+            app.params.cmode = 'edit';
+            const ec = app.model.entities[1];
+            const n0 = ec.pts.length;
+            t.onTap({ x: 40, y: 30 });
+            assert(ec.pts.length === n0 + 1, '在线段上点按应插入节点');
+            t.onTap({ x: 40, y: 30 });
+            assert(ec.pts.length === n0, '再次点按同一节点应删除');
+
+            // 拖动节点
+            const q = ec.pts[0];
+            t.onDragStart({ x: q.x, y: q.y });
+            t.onDragMove({ x: q.x + 12, y: q.y + 8 });
+            t.onDragEnd();
+            near(ec.pts[0].x, q.x + 12, 1e-9, '拖动后节点 X 更新');
+            near(ec.pts[0].y, q.y + 8, 1e-9, '拖动后节点 Y 更新');
+          }
+        },
+        {
+          name: '样条线工具：绘制 / 平滑度 / 手柄与节点编辑',
+          run: function () {
+            const app = mockApp();
+            app.params.smode = 'draw';
+            app.params.smooth = 0.5;
+            app.params.sclosed = false;
+            const t = useTool('spline');
+            t.onTap({ x: 0, y: 0 });
+            t.onTap({ x: 50, y: 50 });
+            t.onTap({ x: 100, y: 0 });
+            t.applyParams();
+            assert(app.model.count() === 1, '应生成 1 条样条线');
+            const e = app.model.entities[0];
+            assert(e.type === 'spline' && e.pts.length === 3, '样条节点数量');
+            near(e.smooth, 0.5, 1e-9, '平滑度应写入图元');
+
+            app.params.smode = 'edit';
+            t.onTap({ x: 50, y: 50 });
+            assert(t.editId === e.id, '编辑模式点按应选中样条');
+            const h = Geo.splineControls(e)[0].out;
+            t.onDragStart(h);
+            assert(t.dragKind === 'out', '应识别控制手柄拖动');
+            t.onDragMove({ x: h.x + 20, y: h.y + 10 });
+            t.onDragEnd();
+            const h2 = Geo.splineControls(e)[0].out;
+            near(h2.x, h.x + 20, 1e-9, '手柄 X 更新');
+            near(h2.y, h.y + 10, 1e-9, '手柄 Y 更新');
+
+            t.onDragStart({ x: 50, y: 50 });
+            assert(t.dragKind === 'node', '应识别节点拖动');
+            t.onDragMove({ x: 60, y: 65 });
+            t.onDragEnd();
+            near(e.pts[1].x, 60, 1e-9, '节点拖动后 X');
+            near(e.pts[1].y, 65, 1e-9, '节点拖动后 Y');
+          }
+        },
+        {
+          name: '水平 / 垂直对齐约束求解与偏差',
+          run: function () {
+            const C = global.CADConstraints;
+            const d = docWith([line(0, 0, 10, 0), line(20, 10, 30, 10), circle(50, 30, 5)]);
+            const ids = d.entities.map(function (e) { return e.id; });
+            const hc = d.addConstraint({ type: 'halign', ids: ids });
+            assert(hc, '应能添加水平对齐约束');
+            const dev0 = C.deviation(d, hc);
+            near(dev0, 30, 1e-9, '水平对齐初始偏差为最大 Y 差');
+            C.solve(d);
+            near(C.repPoint(d.entities[0]).y, 0, 1e-6);
+            near(C.repPoint(d.entities[1]).y, 0, 1e-6, '第二条直线应对齐到基准 Y');
+            near(C.repPoint(d.entities[2]).y, 0, 1e-6, '圆应对齐到基准 Y');
+            near(C.deviation(d, hc), 0, 1e-9, '求解后偏差应为 0');
+            assert(C.deviation(d, hc) <= 2 / 1.6, '偏差应在 2px 容差内');
+
+            const d2 = docWith([line(0, 0, 10, 0), line(20, 10, 30, 10)]);
+            const vc = d2.addConstraint({ type: 'valign', ids: d2.entities.map(function (e) { return e.id; }) });
+            C.solve(d2);
+            near(C.repPoint(d2.entities[0]).x, 5, 1e-6);
+            near(C.repPoint(d2.entities[1]).x, 5, 1e-6, '垂直对齐后 X 一致');
+            near(C.deviation(d2, vc), 0, 1e-9);
+          }
+        },
+        {
+          name: '等长约束与批量约束工具',
+          run: function () {
+            const C = global.CADConstraints;
+            const d = docWith([line(0, 0, 100, 0), line(20, 10, 60, 10)]);
+            const eq = d.addConstraint({ type: 'equal', ids: d.entities.map(function (e) { return e.id; }) });
+            near(C.deviation(d, eq), 60, 1e-9, '等长初始偏差');
+            C.solve(d);
+            near(Geo.entityLength(d.entities[0]), 100, 1e-6);
+            near(Geo.entityLength(d.entities[1]), 100, 1e-6, '第二条直线应缩放到等长');
+            const mid = Geo.entityMidpoint(d.entities[1]);
+            near(mid.x, 40, 1e-6, '等长缩放应保持中点 X');
+            near(mid.y, 10, 1e-6, '等长缩放应保持中点 Y');
+
+            const app = mockApp();
+            const a = app.model.add(line(0, 0, 10, 0));
+            const b = app.model.add(line(20, 10, 30, 10));
+            const t = useTool('chal');
+            t.onTap({ x: 5, y: 0 });
+            t.onTap({ x: 25, y: 10 });
+            assert(t.picks.length === 2, '批量选择应记录 2 个图形');
+            t.applyParams();
+            assert(app.model.constraints.length === 1 && app.model.constraints[0].type === 'halign', '应一键添加水平对齐约束');
+            near(C.repPoint(a).y, C.repPoint(b).y, 1e-6, '批量应用后 Y 对齐');
+
+            const app2 = mockApp();
+            const l1 = app2.model.add(line(0, 0, 100, 0));
+            const l2 = app2.model.add(line(0, 20, 40, 20));
+            const te = useTool('ceq');
+            te.onTap({ x: 50, y: 0 });
+            te.onTap({ x: 20, y: 20 });
+            te.applyParams();
+            near(Geo.entityLength(l1), 100, 1e-6);
+            near(Geo.entityLength(l2), 100, 1e-6, '等长工具一键应用');
+          }
+        },
+        {
+          name: '样条编辑工具与提交按钮标记',
+          run: function () {
+            const app = mockApp();
+            const contour = useTool('contour');
+            assert(contour.params().some(function (f) { return f.apply === true; }), '轮廓线收尾参数应请求确定按钮');
+            const ceq = useTool('ceq');
+            assert(ceq.params().some(function (f) { return f.apply === true; }), '批量约束应请求确定按钮');
+
+            const sp = app.model.add({
+              type: 'spline',
+              pts: [{ x: 0, y: 0 }, { x: 50, y: 40 }, { x: 100, y: 0 }],
+              handles: [], smooth: 0.5, closed: false
+            });
+            const t = useTool('splineEdit');
+            assert(t.cat === 'edit', '样条编辑应位于编辑模块');
+            t.onTap({ x: 50, y: 40 });
+            assert(t.editId === sp.id, '点按应选中样条线');
+            near(app.params.esmooth, 0.5, 1e-9, '应读入样条当前平滑度');
+            app.params.esmooth = 0.9;
+            sp.handles = Geo.splineControls(sp).map(function (n) {
+              return { in: { x: n.in.x, y: n.in.y }, out: { x: n.out.x, y: n.out.y } };
+            });
+            t.applyParams();
+            near(sp.smooth, 0.9, 1e-9, '平滑度应保存');
+            assert(sp.handles.length === 0, '应用后控制手柄应重置');
+            assert(app.model.selected.has(sp.id), '应用后应保持选中');
+            app.params.smode = 'draw';
+          }
+        },
+        {
+          name: '点对齐：参考点 / 求解 / 自定义锚点 / 兼容元素',
+          run: function () {
+            const app = mockApp();
+            const C = global.CADConstraints;
+            const r = app.model.add({ type: 'rect', x1: 0, y1: 0, x2: 100, y2: 50 });
+            near(C.alignPointOf(r, 'lt').x, 0, 1e-9);
+            near(C.alignPointOf(r, 'lt').y, 50, 1e-9);
+            near(C.alignPointOf(r, 'rt').x, 100, 1e-9);
+            near(C.alignPointOf(r, 'lb').y, 0, 1e-9);
+            near(C.alignPointOf(r, 'rb').x, 100, 1e-9);
+            near(C.alignPointOf(r, 'center').x, 50, 1e-9);
+            near(C.alignPointOf(r, 'center').y, 25, 1e-9);
+
+            const c = app.model.add(circle(200, 0, 20));
+            near(C.alignPointOf(c, 'lt').x, 180, 1e-9, '圆左上角 x');
+            near(C.alignPointOf(c, 'lt').y, 20, 1e-9, '圆左上角 y');
+
+            // 兼容文本框 / 图片 / 容器等以边界框描述的元素
+            const box = { type: 'textbox', x1: 10, y1: 20, x2: 30, y2: 40 };
+            near(C.alignPointOf(box, 'rb').x, 30, 1e-9);
+            near(C.alignPointOf(box, 'rb').y, 20, 1e-9);
+            near(C.repPoint(box).x, 20, 1e-9, '未知类型退回包围盒中心');
+
+            // 点对齐求解：左上角水平对齐
+            const th = useTool('chal');
+            app.params.almode = 'point';
+            app.params.alpt = 'lt';
+            app.params.altol = 5;
+            th.picks = [r.id, c.id];
+            th.applyParams();
+            const con = app.model.constraints[app.model.constraints.length - 1];
+            assert(con.pmode === 'point' && con.ptype === 'lt', '约束应记录点对齐配置');
+            near(con.snap, 5, 1e-9, '默认吸附阈值 5px');
+            near(C.alignPointOf(app.model.findById(c.id), 'lt').y,
+              C.alignPointOf(r, 'lt').y, 1e-9, '左上角应水平对齐');
+            near(C.deviation(app.model, con), 0, 1e-9, '对齐后偏差归零');
+
+            // 指定锚点：垂直对齐到 X=120
+            const tv = useTool('cval');
+            app.params.almode = 'point';
+            app.params.alpt = 'custom';
+            app.params.alx = 120;
+            app.params.aly = 0;
+            app.params.altol = 8;
+            tv.picks = [r.id, c.id];
+            tv.applyParams();
+            const con2 = app.model.constraints[app.model.constraints.length - 1];
+            assert(con2.anchor && con2.anchor.x === 120, '应保存锚点坐标');
+            near(C.repPoint(app.model.findById(r.id)).x, 120, 1e-9, '矩形对齐到锚点 X');
+            near(C.repPoint(app.model.findById(c.id)).x, 120, 1e-9, '圆对齐到锚点 X');
+
+            // 切回边界对齐后保持原有行为（使用新图形，避免与点对齐约束互相拉扯）
+            app.params.almode = 'bounds';
+            const r3 = app.model.add({ type: 'rect', x1: 0, y1: 200, x2: 40, y2: 240 });
+            const c3 = app.model.add(circle(300, 300, 10));
+            const th2 = useTool('chal');
+            th2.picks = [r3.id, c3.id];
+            th2.applyParams();
+            const con3 = app.model.constraints[app.model.constraints.length - 1];
+            assert(!con3.pmode, '边界对齐不应写入点对齐字段');
+            near(C.deviation(app.model, con3), 0, 1e-9);
+            th.deactivate();
+            tv.deactivate();
+            th2.deactivate();
+          }
+        },
+        {
+          name: '相对垂直：锚点 / 正负偏移 / 边界 / 校验 / 跨层级 / 屏幕稳定性',
+          run: function () {
+            const C = global.CADConstraints;
+            const app = mockApp();
+            // 参考矩形：x 0~100, y 0~50 → 顶部 50 / 中部 25 / 底部 0
+            const ref = app.model.add({ type: 'rect', x1: 0, y1: 0, x2: 100, y2: 50 });
+            const mov = app.model.add(line(200, 300, 260, 300));
+
+            // 顶部 +20：目标代表点 Y 应为 70
+            const c1 = C.addVerticalRelative(app.model, { ids: [mov.id, ref.id], anchor: 'top', offset: 20 });
+            assert(c1.type === 'vrel' && c1.anchor === 'top' && c1.offset === 20, '应创建顶部 +20 约束');
+            near(C.repPoint(mov).y, 70, 1e-6, '顶部 +20 后目标中点 Y');
+            near(C.verticalRelativeY(app.model, c1), 70, 1e-9, 'verticalRelativeY 顶部 +20');
+            near(C.deviation(app.model, c1), 0, 1e-9, '求解后偏差归零');
+
+            // 中部 -15：目标代表点 Y 应为 10
+            const c2 = C.addVerticalRelative(app.model, { ids: [mov.id, ref.id], anchor: 'middle', offset: -15 });
+            near(C.repPoint(mov).y, 10, 1e-6, '中部 -15 后目标中点 Y');
+            near(C.verticalRelativeY(app.model, c2), 10, 1e-9, 'verticalRelativeY 中部 -15');
+
+            // 底部 +0：目标代表点 Y 应为 0
+            const c3 = C.addVerticalRelative(app.model, { ids: [mov.id, ref.id], anchor: 'bottom', offset: 0 });
+            near(C.repPoint(mov).y, 0, 1e-6, '底部 +0 后目标中点 Y');
+
+            // 默认 anchor=middle、offset=0
+            const c4 = C.addVerticalRelative(app.model, { ids: [mov.id, ref.id] });
+            assert(c4.anchor === 'middle' && c4.offset === 0, '默认应为中部、零偏移');
+            near(C.repPoint(mov).y, 25, 1e-6, '中部零偏移后目标中点 Y');
+
+            // 边界值：±1e6 合法，超出报错
+            const cbUp = C.addVerticalRelative(app.model, { ids: [mov.id, ref.id], anchor: 'top', offset: 1000000 });
+            near(C.verticalRelativeY(app.model, cbUp), 1000050, 1e-6, '上边界 +1e6');
+            const cbDown = C.addVerticalRelative(app.model, { ids: [mov.id, ref.id], anchor: 'bottom', offset: -1000000 });
+            near(C.verticalRelativeY(app.model, cbDown), -1000000, 1e-6, '下边界 -1e6');
+
+            function expectError(fn, re, msg) {
+              let err = null;
+              try { fn(); } catch (e) { err = e; }
+              assert(err, msg + '：应抛出错误');
+              assert(re.test(err.message), msg + '：错误文案应明确');
+            }
+
+            const before = app.model.constraints.length;
+            expectError(function () {
+              C.addVerticalRelative(app.model, { ids: [mov.id, ref.id], anchor: 'top', offset: 1000001 });
+            }, /超出允许范围/, '偏移超上界');
+            expectError(function () {
+              C.addVerticalRelative(app.model, { ids: [mov.id, ref.id], anchor: 'top', offset: -1000001 });
+            }, /超出允许范围/, '偏移超下界');
+            expectError(function () {
+              C.addVerticalRelative(app.model, { ids: [mov.id, ref.id], anchor: 'top', offset: NaN });
+            }, /有效数值/, '非法偏移 NaN');
+            expectError(function () {
+              C.addVerticalRelative(app.model, { ids: [mov.id, ref.id], anchor: 'center', offset: 0 });
+            }, /参考位置/, '非法锚点');
+            expectError(function () {
+              C.addVerticalRelative(app.model, { ids: [mov.id, 'missing'], anchor: 'top', offset: 0 });
+            }, /参考元素不存在/, '参考元素缺失');
+            expectError(function () {
+              C.addVerticalRelative(app.model, { ids: ['missing', ref.id], anchor: 'top', offset: 0 });
+            }, /目标元素不存在/, '目标元素缺失');
+            expectError(function () {
+              C.addVerticalRelative(app.model, { ids: [mov.id, mov.id], anchor: 'top', offset: 0 });
+            }, /不能相同/, '目标与参考相同');
+            expectError(function () {
+              C.addVerticalRelative(app.model, { ids: [mov.id], anchor: 'top', offset: 0 });
+            }, /需要同时指定/, '缺少参考元素');
+            assert(app.model.constraints.length === before, '非法约束应回滚，不残留');
+            expectError(function () {
+              C.verticalRelativeY(app.model, { type: 'vrel', ids: [mov.id, 'missing'], anchor: 'top', offset: 0 });
+            }, /参考元素不存在/, 'verticalRelativeY 参数非法');
+            assert(C.deviation(app.model, { type: 'vrel', ids: [mov.id, 'missing'], anchor: 'top', offset: 0 }) === null,
+              '无效约束偏差应为 null');
+
+            // 跨层级：参考元素在目标之后添加，且为不同结构类型的容器
+            const d2 = docWith([line(0, 300, 40, 300)]);
+            const target = d2.entities[0];
+            const box = d2.add({ type: 'textbox', x1: 10, y1: 100, x2: 30, y2: 200 });
+            C.addVerticalRelative(d2, { ids: [target.id, box.id], anchor: 'bottom', offset: 5 });
+            near(C.repPoint(target).y, 105, 1e-6, '跨层级容器底部 +5');
+
+            // 跨层级：圆弧参考（不同类型，按圆弧包围盒中部对齐）
+            const d3 = docWith([line(0, 0, 20, 0)]);
+            const t3 = d3.entities[0];
+            const ar = d3.add(arc(100, 80, 20, 0, Math.PI));
+            C.addVerticalRelative(d3, { ids: [t3.id, ar.id], anchor: 'middle', offset: 0 });
+            const ab = Geo.entityBBox(ar);
+            near(C.repPoint(t3).y, (ab.y1 + ab.y2) / 2, 1e-6, '圆弧中部对齐');
+
+            // 屏幕缩放稳定性：只改变视图缩放并重复求解，世界坐标不应漂移
+            const app3 = mockApp();
+            const r3 = app3.model.add({ type: 'rect', x1: 0, y1: 0, x2: 100, y2: 50 });
+            const m3 = app3.model.add(line(500, 500, 540, 500));
+            C.addVerticalRelative(app3.model, { ids: [m3.id, r3.id], anchor: 'top', offset: 30 });
+            const y0 = C.repPoint(m3).y;
+            near(y0, 80, 1e-9, '屏幕缩放前位置');
+            [0.25, 0.5, 1, 2.5, 8].forEach(function (s) {
+              app3.view.scale = s;
+              C.solve(app3.model);
+              near(C.repPoint(m3).y, y0, 1e-6, '缩放 ' + s + ' 时位置稳定');
+            });
+
+            // 删除参考 / 目标后约束应被清理
+            const app4 = mockApp();
+            const r4 = app4.model.add({ type: 'rect', x1: 0, y1: 0, x2: 10, y2: 10 });
+            const m4 = app4.model.add(line(0, 50, 10, 50));
+            C.addVerticalRelative(app4.model, { ids: [m4.id, r4.id], anchor: 'top', offset: 0 });
+            assert(app4.model.constraints.some(function (c) { return c.type === 'vrel'; }), '应存在相对垂直约束');
+            app4.model.remove(r4.id);
+            app4.model.pruneRefs();
+            assert(!app4.model.constraints.some(function (c) { return c.type === 'vrel'; }), '删除参考元素后约束应清理');
+
+            const app4b = mockApp();
+            const r4b = app4b.model.add({ type: 'rect', x1: 0, y1: 0, x2: 10, y2: 10 });
+            const m4b = app4b.model.add(line(0, 50, 10, 50));
+            C.addVerticalRelative(app4b.model, { ids: [m4b.id, r4b.id], anchor: 'top', offset: 0 });
+            app4b.model.remove(m4b.id);
+            app4b.model.pruneRefs();
+            assert(!app4b.model.constraints.some(function (c) { return c.type === 'vrel'; }), '删除目标元素后约束应清理');
+
+            // 工具流程：参数、正常应用、非法偏移提示
+            const app5 = mockApp();
+            const ref5 = app5.model.add({ type: 'rect', x1: 0, y1: 0, x2: 100, y2: 50 });
+            const mv5 = app5.model.add(line(300, -200, 340, -200));
+            const tvrel = useTool('cvrel');
+            const fields = tvrel.params();
+            assert(fields.some(function (f) { return f.key === 'rvanchor' && f.apply === true; }),
+              '参考位置参数应请求确定按钮');
+            assert(fields.some(function (f) { return f.key === 'rvoffset'; }), '应有垂直偏移参数');
+            app5.params.rvanchor = 'bottom';
+            app5.params.rvoffset = 25;
+            tvrel.picks = [mv5.id, ref5.id];
+            tvrel.applyParams();
+            const con5 = app5.model.constraints[app5.model.constraints.length - 1];
+            assert(con5.type === 'vrel' && con5.anchor === 'bottom' && con5.offset === 25,
+              '工具应创建正确的相对垂直约束');
+            near(C.repPoint(mv5).y, 25, 1e-6, '工具底部 +25 定位');
+
+            const count5 = app5.model.constraints.length;
+            app5.params.rvoffset = 2000000;
+            tvrel.picks = [mv5.id, ref5.id];
+            tvrel.applyParams();
+            assert(app5.model.constraints.length === count5, '非法偏移不应创建约束');
+            assert(app5.toasts.some(function (m) { return /超出允许范围/.test(m); }), '应提示偏移超范围');
+            tvrel.deactivate();
+          }
+        },
+        {
+          name: '功能徽标说明映射：全部工具覆盖且主题有效',
+          run: function () {
+            const map = global.CAD_FEATURE_HELP;
+            const meta = global.CAD_HELP_META || {};
+            assert(map && typeof map === 'object', '应存在功能说明映射');
+            const titles = Object.keys(meta);
+            assert(titles.length === 33, '功能说明主题应为 33 项，实际 ' + titles.length);
+            const tools = global.CADTools.list;
+            assert(tools.length > 40, '工具数量应覆盖全部模块，实际 ' + tools.length);
+            const missing = [];
+            const badTopic = [];
+            const badSteps = [];
+            tools.forEach(function (t) {
+              const e = map[t.id];
+              if (!e) { missing.push(t.id); return; }
+              if (!e.topic || titles.indexOf(e.topic) < 0) badTopic.push(t.id + ':' + (e.topic || ''));
+              if (!Array.isArray(e.steps) || e.steps.length < 2) badSteps.push(t.id);
+              (e.related || []).forEach(function (r) {
+                if (titles.indexOf(r) < 0) badTopic.push(t.id + '->' + r);
+              });
+            });
+            assert(missing.length === 0, '工具缺少说明映射：' + missing.join(','));
+            assert(badTopic.length === 0, '无效说明主题：' + badTopic.join(','));
+            assert(badSteps.length === 0, '操作步骤不足：' + badSteps.join(','));
+            const extra = Object.keys(map).filter(function (id) {
+              return !global.CADTools.byId(id);
+            });
+            assert(extra.length === 0, '存在无对应工具的映射：' + extra.join(','));
+          }
+        }
+      ]
     }
   ];
 

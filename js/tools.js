@@ -1463,6 +1463,576 @@
     }
   });
 
+  /* ================= 绘图：轮廓线 ================= */
+  const contourTool = baseTool({
+    id: 'contour', name: '轮廓线', cat: 'draw', icon: '⌇', dragType: 'tool', hoverLive: true,
+    prompt: function () {
+      if (App.params.cmode === 'edit') {
+        if (this.dragIdx >= 0) return '拖动节点调整轮廓，松手完成';
+        return '点按轮廓节点选中 / 再次点按删除；点按线段插入节点；拖动节点调整';
+      }
+      const n = this.points.length;
+      if (!n) return '点按起点开始绘制轮廓';
+      if (n >= 3) return '继续点按添加节点（已有 ' + n + ' 个）；点回起点闭合，或点“确定”按收尾设置完成';
+      return '继续点按添加节点（已有 ' + n + ' 个）';
+    },
+    params: function () {
+      return [
+        {
+          key: 'cmode', type: 'choice', label: '模式', def: 'draw', group: '模式',
+          options: [{ v: 'draw', label: '绘制' }, { v: 'edit', label: '编辑节点' }]
+        },
+        {
+          key: 'cend', type: 'choice', label: '收尾', def: 'auto', group: '轮廓', apply: true,
+          when: function (p) { return p.cmode !== 'edit'; },
+          options: [{ v: 'auto', label: '自动检测' }, { v: 'open', label: '开放' }, { v: 'closed', label: '闭合' }]
+        }
+      ];
+    },
+    reset: function () {
+      this.points = [];
+      this.hover = null;
+      this.editId = null;
+      this.selIdx = -1;
+      this.dragIdx = -1;
+      this.dragClone = null;
+    },
+    _select: function (id) {
+      App.model.selected.clear();
+      App.model.selected.add(id);
+      if (App.afterSelectionChange) App.afterSelectionChange();
+    },
+    _finish: function (forceClosed) {
+      let pts = this.points.slice();
+      if (pts.length < 2) { App.toast('至少需要 2 个节点'); return false; }
+      const tol = Math.max(App.worldTol ? App.worldTol(14) : 0, 1e-6);
+      const mode = App.params.cend || 'auto';
+      let closed = forceClosed === true || mode === 'closed';
+      if (!closed && mode === 'auto') closed = Geo.contourClosure(pts, tol);
+      if (closed) {
+        if (pts.length < 3) { App.toast('闭合轮廓至少需要 3 个节点'); return false; }
+        if (pts.length > 3 && Geo.dist(pts[0], pts[pts.length - 1]) <= tol) pts.pop();
+      }
+      addEntities([{ type: 'poly', pts: pts.map(Geo.cloneP), closed: closed }]);
+      this.reset();
+      App.toast(closed ? '已生成闭合轮廓' : '已生成开放轮廓');
+      App.updateParams && App.updateParams();
+      App.updatePrompt();
+      App.refresh();
+      return true;
+    },
+    _vertexAt: function (p) {
+      const tol = App.worldTol ? App.worldTol(16) : 0;
+      let best = null, bestD = tol;
+      const list = App.model.entities.slice();
+      const cur = list.findIndex(function (e) { return e.id === this.editId; }, this);
+      if (cur > 0) list.unshift(list.splice(cur, 1)[0]);
+      list.forEach(function (e) {
+        if (e.type !== 'poly' || !e.pts) return;
+        e.pts.forEach(function (q, i) {
+          const d = Geo.dist(p, q);
+          if (d < bestD) { bestD = d; best = { id: e.id, idx: i, ent: e }; }
+        });
+      });
+      return best;
+    },
+    _segAt: function (p) {
+      const tol = App.worldTol ? App.worldTol(14) : 0;
+      let best = null, bestD = tol;
+      const list = App.model.entities.slice();
+      const cur = list.findIndex(function (e) { return e.id === this.editId; }, this);
+      if (cur > 0) list.unshift(list.splice(cur, 1)[0]);
+      list.forEach(function (e) {
+        if (e.type !== 'poly' || !e.pts || e.pts.length < 2) return;
+        const n = e.pts.length;
+        const count = e.closed !== false ? n : n - 1;
+        for (let i = 0; i < count; i++) {
+          const r = Geo.closestOnSeg(p, e.pts[i], e.pts[(i + 1) % n]);
+          if (r.dist < bestD && r.t > 0.02 && r.t < 0.98) {
+            bestD = r.dist;
+            best = { id: e.id, idx: i, point: r.point, ent: e };
+          }
+        }
+      });
+      return best;
+    },
+    _deleteNode: function (hit) {
+      const e = hit.ent;
+      const min = e.closed !== false ? 3 : 2;
+      if (e.pts.length <= min) { App.toast('节点太少，无法删除（最少 ' + min + ' 个）'); return; }
+      App.begin();
+      e.pts.splice(hit.idx, 1);
+      App.end();
+      this.selIdx = -1;
+      App.toast('已删除节点，相邻线段自动合并');
+      App.updatePrompt();
+      App.refresh();
+    },
+    _insertNode: function (seg) {
+      App.begin();
+      seg.ent.pts.splice(seg.idx + 1, 0, { x: seg.point.x, y: seg.point.y });
+      App.end();
+      this.editId = seg.id;
+      this.selIdx = seg.idx + 1;
+      this.dragIdx = -1;
+      this._select(seg.id);
+      App.toast('已在选中线段上插入节点');
+      App.updatePrompt();
+      App.refresh();
+    },
+    _editTap: function (p) {
+      const hit = this._vertexAt(p);
+      if (hit) {
+        if (this.editId === hit.id && this.selIdx === hit.idx) {
+          this._deleteNode(hit);
+          return;
+        }
+        this.editId = hit.id;
+        this.selIdx = hit.idx;
+        this.dragIdx = -1;
+        this._select(hit.id);
+        App.toast('拖动调整节点；再次点按该节点删除');
+        App.refresh();
+        return;
+      }
+      const seg = this._segAt(p);
+      if (seg) { this._insertNode(seg); return; }
+      const e = App.pick(p);
+      if (e && e.type === 'poly') {
+        this.editId = e.id;
+        this.selIdx = -1;
+        this._select(e.id);
+        App.toast('已选中轮廓，点按节点或线段进行编辑');
+      } else {
+        this.editId = null;
+        this.selIdx = -1;
+      }
+      App.refresh();
+    },
+    onTap: function (p) {
+      if (App.params.cmode === 'edit') { this._editTap(p); return; }
+      if (this.points.length >= 3 &&
+        Geo.dist(p, this.points[0]) <= (App.worldTol ? App.worldTol(14) : 0)) {
+        this._finish(true);
+        return;
+      }
+      if (this.points.length && Geo.dist(p, this.points[this.points.length - 1]) < 1e-6) return;
+      this.points.push(Geo.cloneP(p));
+      App.updatePrompt();
+      App.refresh();
+    },
+    applyParams: function () {
+      if (App.params.cmode === 'edit') { App.toast('编辑模式下拖动节点调整，点按线段插入节点'); return; }
+      this._finish(false);
+    },
+    onDragStart: function (p) {
+      if (App.params.cmode !== 'edit') return;
+      const hit = this._vertexAt(p);
+      if (!hit) { this.dragIdx = -1; return; }
+      this.editId = hit.id;
+      this.selIdx = hit.idx;
+      this.dragIdx = hit.idx;
+      this.dragClone = Geo.copyShape({}, hit.ent);
+      this._select(hit.id);
+      App.begin();
+    },
+    onDragMove: function (p) {
+      if (this.dragIdx < 0) return;
+      const e = App.model.findById(this.editId);
+      if (!e || !e.pts) return;
+      e.pts[this.dragIdx] = { x: p.x, y: p.y };
+      if (App.solveConstraints) App.solveConstraints();
+      App.refresh();
+    },
+    onDragEnd: function () {
+      if (this.dragIdx < 0) return;
+      const e = App.model.findById(this.editId);
+      let bad = false;
+      if (e && e.pts) {
+        const n = e.pts.length;
+        for (let i = 0; i < n; i++) {
+          if (Geo.dist(e.pts[i], e.pts[(i + 1) % n]) < 1e-9) { bad = true; break; }
+        }
+      }
+      if (e && this.dragClone && bad) {
+        Geo.copyShape(e, this.dragClone);
+        App.toast('节点调整后轮廓退化，已还原');
+      } else {
+        App.toast('轮廓节点已调整');
+      }
+      this.dragIdx = -1;
+      this.dragClone = null;
+      App.end();
+    },
+    onDragCancel: function () {
+      if (this.dragIdx < 0) return;
+      const e = App.model.findById(this.editId);
+      if (e && this.dragClone) Geo.copyShape(e, this.dragClone);
+      this.dragIdx = -1;
+      this.dragClone = null;
+      if (App.abort) App.abort();
+    },
+    onRender: function (ctx, R) {
+      if (App.params.cmode === 'edit') {
+        const e = this.editId != null ? App.model.findById(this.editId) : null;
+        if (!e || e.type !== 'poly' || !e.pts) return;
+        e.pts.forEach(function (q, i) {
+          const s = R.screen(q);
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, i === this.selIdx ? 6 : 4.5, 0, Geo.TAU);
+          ctx.fillStyle = i === this.selIdx ? '#ffb020' : '#37c8ff';
+          ctx.strokeStyle = '#0d1117';
+          ctx.lineWidth = 1.5;
+          ctx.fill();
+          ctx.stroke();
+          ctx.restore();
+        }, this);
+        return;
+      }
+      if (!this.points.length) return;
+      for (let i = 0; i < this.points.length; i++) {
+        const s = R.screen(this.points[i]);
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, 4, 0, Geo.TAU);
+        ctx.fillStyle = i === 0 ? '#ffb020' : '#37c8ff';
+        ctx.fill();
+        ctx.restore();
+        if (i > 0) R.previewLine(this.points[i - 1], this.points[i]);
+      }
+      if (this.hover && this.points.length) {
+        R.previewLine(this.points[this.points.length - 1], this.hover);
+        if (App.params.cend !== 'open' && this.points.length >= 2) {
+          R.previewLine(this.hover, this.points[0]);
+        }
+      }
+      if (this.points.length >= 3 && App.params.cend !== 'open') {
+        R.previewLabel('点回起点闭合', this.points[0]);
+      }
+    }
+  });
+
+  /* ================= 绘图：贝塞尔样条线 ================= */
+  const splineTool = baseTool({
+    id: 'spline', name: '样条线', cat: 'draw', icon: '∿', dragType: 'tool', hoverLive: true,
+    prompt: function () {
+      if (App.params.smode === 'edit') {
+        if (this.dragKind) return '拖动手柄调整曲线，松手完成';
+        return '点按样条线选中；拖动节点移动，拖动手柄端点调整曲率';
+      }
+      const n = this.points.length;
+      if (!n) return '点按起点开始绘制贝塞尔样条线';
+      return '继续点按添加节点（已有 ' + n + ' 个），点“确定”完成；平滑度可在面板调整';
+    },
+    params: function () {
+      return [
+        {
+          key: 'smode', type: 'choice', label: '模式', def: 'draw', group: '模式',
+          options: [{ v: 'draw', label: '绘制' }, { v: 'edit', label: '编辑手柄' }]
+        },
+        {
+          key: 'smooth', label: '平滑度', def: 0.5, min: 0, max: 1, group: '曲线',
+          when: function (p) { return p.smode !== 'edit'; }
+        },
+        {
+          key: 'sclosed', type: 'toggle', label: '闭合曲线', def: false, group: '曲线',
+          when: function (p) { return p.smode !== 'edit'; }
+        }
+      ];
+    },
+    reset: function () {
+      this.points = [];
+      this.hover = null;
+      this.editId = null;
+      this.dragKind = null;
+      this.dragIdx = -1;
+      this.dragStart = null;
+      this.dragClone = null;
+    },
+    _smooth: function () {
+      let s = Number(App.params.smooth);
+      if (!isFinite(s)) s = 0.5;
+      return Math.max(0, Math.min(1, s));
+    },
+    _mkSpline: function (pts, closed) {
+      if (!pts || pts.length < 2) return null;
+      return {
+        type: 'spline', pts: pts.map(Geo.cloneP), handles: [],
+        smooth: this._smooth(), closed: !!closed
+      };
+    },
+    _finish: function () {
+      const closed = App.params.sclosed === true || (this.hover && this.points.length >= 3 &&
+        Geo.dist(this.hover, this.points[0]) <= (App.worldTol ? App.worldTol(14) : 0));
+      const ent = this._mkSpline(this.points, closed);
+      if (!ent) { App.toast('至少需要 2 个节点'); return false; }
+      addEntities([ent]);
+      this.reset();
+      App.toast(closed ? '已生成闭合样条线' : '已生成样条线');
+      App.updateParams && App.updateParams();
+      App.updatePrompt();
+      App.refresh();
+      return true;
+    },
+    _initHandles: function (e) {
+      if (!e || e.type !== 'spline') return;
+      if (e.handles && e.handles.length === e.pts.length) return;
+      const nodes = Geo.splineControls(e);
+      e.handles = nodes.map(function (n) {
+        return { in: Geo.cloneP(n.in), out: Geo.cloneP(n.out) };
+      });
+    },
+    _nodeAt: function (p) {
+      const tol = App.worldTol ? App.worldTol(16) : 0;
+      let best = null, bestD = tol;
+      const list = App.model.entities.slice();
+      const cur = list.findIndex(function (e) { return e.id === this.editId; }, this);
+      if (cur > 0) list.unshift(list.splice(cur, 1)[0]);
+      list.forEach(function (e) {
+        if (e.type !== 'spline' || !e.pts) return;
+        e.pts.forEach(function (q, i) {
+          const d = Geo.dist(p, q);
+          if (d < bestD) { bestD = d; best = { id: e.id, idx: i, ent: e }; }
+        });
+      });
+      return best;
+    },
+    _handleAt: function (p) {
+      const tol = App.worldTol ? App.worldTol(14) : 0;
+      let best = null, bestD = tol;
+      const list = App.model.entities.slice();
+      const cur = list.findIndex(function (e) { return e.id === this.editId; }, this);
+      if (cur > 0) list.unshift(list.splice(cur, 1)[0]);
+      list.forEach(function (e) {
+        if (e.type !== 'spline' || !e.pts) return;
+        const nodes = Geo.splineControls(e);
+        nodes.forEach(function (n, i) {
+          const di = Geo.dist(p, n.in);
+          if (di < bestD) { bestD = di; best = { id: e.id, idx: i, kind: 'in', ent: e }; }
+          const dout = Geo.dist(p, n.out);
+          if (dout < bestD) { bestD = dout; best = { id: e.id, idx: i, kind: 'out', ent: e }; }
+        });
+      });
+      return best;
+    },
+    _select: function (id) {
+      App.model.selected.clear();
+      App.model.selected.add(id);
+      if (App.afterSelectionChange) App.afterSelectionChange();
+    },
+    onTap: function (p) {
+      if (App.params.smode === 'edit') {
+        const e = App.pick(p);
+        if (e && e.type === 'spline') {
+          this.editId = e.id;
+          this._select(e.id);
+          App.toast('已选中样条线：拖动节点移动，拖动手柄调整曲率');
+          App.refresh();
+        } else {
+          this.editId = null;
+          App.refresh();
+        }
+        return;
+      }
+      if (this.points.length >= 3 &&
+        Geo.dist(p, this.points[0]) <= (App.worldTol ? App.worldTol(14) : 0)) {
+        this.hover = p;
+        this._finish();
+        return;
+      }
+      if (this.points.length && Geo.dist(p, this.points[this.points.length - 1]) < 1e-6) return;
+      this.points.push(Geo.cloneP(p));
+      App.updatePrompt();
+      App.refresh();
+    },
+    applyParams: function () {
+      if (App.params.smode === 'edit') { App.toast('编辑模式下拖动节点或手柄调整'); return; }
+      this._finish();
+    },
+    onParamChange: function (key, val) {
+      if (key !== 'smooth' || App.params.smode === 'edit') return;
+      App.refresh();
+    },
+    onDragStart: function (p) {
+      if (App.params.smode !== 'edit') return;
+      const node = this._nodeAt(p);
+      const handle = this._handleAt(p);
+      if (!node && !handle) return;
+      const target = handle && (!node || Geo.dist(p, handle.kind === 'in' ? Geo.splineControls(handle.ent)[handle.idx].in : Geo.splineControls(handle.ent)[handle.idx].out) < Geo.dist(p, node.ent.pts[node.idx])) ? handle : null;
+      const pick = target || node;
+      if (!pick) return;
+      this.editId = pick.id;
+      this.dragIdx = pick.idx;
+      this.dragKind = target ? target.kind : 'node';
+      this.dragStart = { x: p.x, y: p.y };
+      this.dragClone = JSON.parse(JSON.stringify(pick.ent));
+      if (this.dragKind !== 'node') this._initHandles(pick.ent);
+      this._select(pick.id);
+      App.begin();
+    },
+    onDragMove: function (p) {
+      if (!this.dragKind) return;
+      const e = App.model.findById(this.editId);
+      if (!e || e.type !== 'spline') return;
+      if (this.dragKind === 'node') {
+        const dx = p.x - this.dragStart.x, dy = p.y - this.dragStart.y;
+        e.pts[this.dragIdx] = { x: p.x, y: p.y };
+        if (e.handles && e.handles[this.dragIdx]) {
+          const h = e.handles[this.dragIdx];
+          if (h.in) { h.in.x += dx; h.in.y += dy; }
+          if (h.out) { h.out.x += dx; h.out.y += dy; }
+        }
+        this.dragStart = { x: p.x, y: p.y };
+      } else {
+        this._initHandles(e);
+        if (e.handles && e.handles[this.dragIdx]) {
+          e.handles[this.dragIdx][this.dragKind] = { x: p.x, y: p.y };
+        }
+      }
+      if (App.solveConstraints) App.solveConstraints();
+      App.refresh();
+    },
+    onDragEnd: function () {
+      if (!this.dragKind) return;
+      App.toast(this.dragKind === 'node' ? '样条节点已调整' : '控制手柄已调整');
+      this.dragKind = null;
+      this.dragIdx = -1;
+      this.dragStart = null;
+      this.dragClone = null;
+      App.end();
+    },
+    onDragCancel: function () {
+      if (!this.dragKind) return;
+      const e = App.model.findById(this.editId);
+      if (e && this.dragClone) Geo.copyShape(e, this.dragClone);
+      this.dragKind = null;
+      this.dragIdx = -1;
+      this.dragStart = null;
+      this.dragClone = null;
+      if (App.abort) App.abort();
+    },
+    onRender: function (ctx, R) {
+      if (App.params.smode === 'edit') {
+        const e = this.editId != null ? App.model.findById(this.editId) : null;
+        if (!e || e.type !== 'spline' || !e.pts) return;
+        const nodes = Geo.splineControls(e);
+        nodes.forEach(function (n, i) {
+          const sp = R.screen(n.p), si = R.screen(n.in), so = R.screen(n.out);
+          ctx.save();
+          ctx.strokeStyle = 'rgba(55, 200, 255, 0.55)';
+          ctx.lineWidth = 1;
+          ctx.setLineDash([4, 3]);
+          ctx.beginPath();
+          ctx.moveTo(si.x, si.y); ctx.lineTo(sp.x, sp.y); ctx.lineTo(so.x, so.y);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.beginPath();
+          ctx.arc(si.x, si.y, 3.5, 0, Geo.TAU);
+          ctx.arc(so.x, so.y, 3.5, 0, Geo.TAU);
+          ctx.fillStyle = '#ffb020';
+          ctx.fill();
+          ctx.beginPath();
+          ctx.arc(sp.x, sp.y, i === this.dragIdx && this.dragKind === 'node' ? 6 : 4.5, 0, Geo.TAU);
+          ctx.fillStyle = '#37c8ff';
+          ctx.strokeStyle = '#0d1117';
+          ctx.lineWidth = 1.5;
+          ctx.fill();
+          ctx.stroke();
+          ctx.restore();
+        }, this);
+        return;
+      }
+      if (!this.points.length) return;
+      const pts = this.points.slice();
+      if (this.hover) pts.push(this.hover);
+      const preview = this._mkSpline(pts, false);
+      if (preview) R.previewEntity(preview);
+      this.points.forEach(function (q, i) {
+        const s = R.screen(q);
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, 4, 0, Geo.TAU);
+        ctx.fillStyle = i === 0 ? '#ffb020' : '#37c8ff';
+        ctx.fill();
+        ctx.restore();
+      }, this);
+      if (this.points.length >= 3) R.previewLabel('点回起点闭合', this.points[0]);
+    }
+  });
+
+  /* ================= 编辑：样条线编辑（扩展功能，默认隐藏） ================= */
+  const splineEditTool = baseTool({
+    id: 'splineEdit', name: '样条编辑', cat: 'edit', icon: '∿', dragType: 'tool', hoverLive: true,
+    prompt: function () {
+      if (this.dragKind) return '拖动手柄调整曲线，松手完成';
+      return '点按样条线选中；拖动节点移动，拖动手柄端点调整曲率；修改平滑度后点“确定”';
+    },
+    params: function () {
+      return [{ key: 'esmooth', label: '平滑度', def: 0.5, min: 0, max: 1, group: '曲线' }];
+    },
+    reset: function () {
+      this.editId = null;
+      this.dragKind = null;
+      this.dragIdx = -1;
+      this.dragStart = null;
+      this.dragClone = null;
+    },
+    activate: function () {
+      this.reset();
+      // 复用样条工具的编辑分支
+      App.params.smode = 'edit';
+    },
+    deactivate: function () {
+      this.reset();
+      App.params.smode = 'draw';
+    },
+    _initHandles: splineTool._initHandles,
+    _nodeAt: splineTool._nodeAt,
+    _handleAt: splineTool._handleAt,
+    _select: splineTool._select,
+    onTap: function (p) {
+      splineTool.onTap.call(this, p);
+      const e = this.editId ? App.model.findById(this.editId) : null;
+      if (e && e.type === 'spline') {
+        App.params.esmooth = typeof e.smooth === 'number' ? e.smooth : 0.5;
+        App.updateParams && App.updateParams();
+      }
+    },
+    onDragStart: splineTool.onDragStart,
+    onDragMove: splineTool.onDragMove,
+    onDragEnd: splineTool.onDragEnd,
+    onDragCancel: splineTool.onDragCancel,
+    onRender: splineTool.onRender,
+    applyParams: function () {
+      let e = this.editId ? App.model.findById(this.editId) : null;
+      if (!e || e.type !== 'spline') {
+        const sel = App.model.selectedEntities ? App.model.selectedEntities() : [];
+        e = sel.filter(function (x) { return x.type === 'spline'; })[0] || null;
+      }
+      if (!e) { App.toast('请先点按一条样条线'); return; }
+      let s = Number(App.params.esmooth);
+      if (!isFinite(s)) { App.toast('请输入 0~1 的平滑度'); return; }
+      s = Math.max(0, Math.min(1, s));
+      const old = typeof e.smooth === 'number' ? e.smooth : 0.5;
+      const changed = Math.abs(old - s) > 1e-9;
+      App.begin();
+      if (changed) {
+        e.smooth = s;
+        e.handles = [];
+      }
+      App.end();
+      this.editId = e.id;
+      App.model.selected.clear();
+      App.model.selected.add(e.id);
+      if (App.afterSelectionChange) App.afterSelectionChange();
+      App.toast(changed ? '已应用平滑度 ' + s + '，控制手柄已重置' : '样条线编辑已保存');
+      App.updateParams && App.updateParams();
+      App.updatePrompt();
+      App.refresh();
+    }
+  });
+
   /* ================= 绘图：点 ================= */
   const pointTool = baseTool({
     id: 'point', name: '点', cat: 'draw', icon: '•', dragType: 'preview',
@@ -3059,7 +3629,7 @@
     if (e.type === 'line') return Geo.lerp(e.p1, e.p2, 0.5);
     if (e.type === 'circle' || e.type === 'arc') return { x: e.c.x, y: e.c.y };
     if (e.type === 'point') return { x: e.p.x, y: e.p.y };
-    if (e.type === 'rect' || e.type === 'poly') {
+    if (e.type === 'rect' || e.type === 'poly' || e.type === 'spline') {
       const b = Geo.entityBBox(e);
       return { x: (b.x1 + b.x2) / 2, y: (b.y1 + b.y2) / 2 };
     }
@@ -3149,6 +3719,439 @@
     });
     return tool;
   }
+
+  function alignLabel(pt) {
+    const C = global.CADConstraints;
+    if (C && C.alignPoints) return C.alignPoints[pt] || '中心点';
+    return {
+      lt: '左上角', center: '中心点', rt: '右上角',
+      lb: '左下角', rb: '右下角', custom: '指定锚点'
+    }[pt] || '中心点';
+  }
+
+  /** 批量约束：点按 / 框选多个图形后一键应用；阈值以 2 屏幕像素实时判定 */
+  function makeBatchConstraintTool(cfg) {
+    const alignable = cfg.type === 'halign' || cfg.type === 'valign';
+    const tool = baseTool({
+      id: cfg.id, name: cfg.name, cat: 'constraint', icon: cfg.icon, dragType: 'tool',
+      hoverLive: true,
+      prompt: function () {
+        const n = (this.picks || []).length;
+        const pointMode = alignable && App.params.almode === 'point';
+        if (!n) {
+          if (pointMode) {
+            return cfg.hint + '（点对齐 · ' + alignLabel(App.params.alpt) + '）：点按图形加入，或框选；数字键 1~5 切换对齐点，0 指定锚点，M 切回边界对齐';
+          }
+          return cfg.hint + '：点按图形加入，或拖动框选批量选择；至少 2 个后点“确定”一键应用';
+        }
+        if (pointMode) {
+          return '点对齐（' + alignLabel(App.params.alpt) + '）已选 ' + n + ' 个：数字键切换对齐点，点“确定”一键应用';
+        }
+        return '已选 ' + n + ' 个图形：继续点按添加，或点“确定”一键应用' + cfg.name;
+      },
+      params: function () {
+        const fields = [];
+        if (alignable) {
+          fields.push({
+            key: 'almode', type: 'choice', label: '对齐方式', def: 'bounds', group: '对齐', apply: true,
+            options: [{ v: 'bounds', label: '边界对齐' }, { v: 'point', label: '点对齐' }]
+          });
+          fields.push({
+            key: 'alpt', type: 'choice', label: '对齐点', def: 'center', group: '点对齐', apply: true,
+            when: function (p) { return p.almode === 'point'; },
+            options: [
+              { v: 'lt', label: '左上角' }, { v: 'center', label: '中心点' }, { v: 'rt', label: '右上角' },
+              { v: 'lb', label: '左下角' }, { v: 'rb', label: '右下角' }, { v: 'custom', label: '指定锚点' }
+            ]
+          });
+          fields.push({
+            key: 'alx', label: '锚点 X', def: 0, group: '指定锚点',
+            when: function (p) { return p.almode === 'point' && p.alpt === 'custom'; }
+          });
+          fields.push({
+            key: 'aly', label: '锚点 Y', def: 0, group: '指定锚点',
+            when: function (p) { return p.almode === 'point' && p.alpt === 'custom'; }
+          });
+          fields.push({
+            key: 'altol', label: '吸附阈值(px)', def: 5, min: 0, max: 50, group: '点对齐',
+            when: function (p) { return p.almode === 'point'; }
+          });
+        }
+        fields.push({ key: 'cshow', type: 'toggle', label: '显示标记', def: true, group: '约束', apply: true });
+        return fields;
+      },
+      reset: function () {
+        this.picks = [];
+        this.hover = null;
+        this.hoverEnt = null;
+        this.band = null;
+      },
+      activate: function () {
+        this.reset();
+        this._bindAlignKeys();
+      },
+      deactivate: function () {
+        this._unbindAlignKeys();
+        this.reset();
+      },
+      /** 数字键选择对齐点，M 在边界 / 点对齐间切换 */
+      _bindAlignKeys: function () {
+        if (!alignable || this._alignKeyDown) return;
+        const self = this;
+        this._alignKeyDown = function (e) {
+          const tag = e.target && e.target.tagName;
+          if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+          if (e.ctrlKey || e.metaKey || e.altKey) return;
+          if (e.key === 'm' || e.key === 'M') {
+            e.preventDefault();
+            App.params.almode = App.params.almode === 'point' ? 'bounds' : 'point';
+            if (App.updateParams) App.updateParams();
+            if (App.updatePrompt) App.updatePrompt();
+            if (App.refresh) App.refresh();
+            if (App.toast) App.toast(App.params.almode === 'point' ? '已切换到点对齐' : '已切换到边界对齐');
+            return;
+          }
+          const map = { '1': 'lt', '2': 'center', '3': 'rt', '4': 'lb', '5': 'rb', '0': 'custom' };
+          const pt = map[e.key];
+          if (!pt) return;
+          e.preventDefault();
+          App.params.almode = 'point';
+          App.params.alpt = pt;
+          if (App.updateParams) App.updateParams();
+          if (App.updatePrompt) App.updatePrompt();
+          if (App.refresh) App.refresh();
+          if (App.toast) App.toast('对齐点：' + alignLabel(pt));
+        };
+        window.addEventListener('keydown', this._alignKeyDown);
+      },
+      _unbindAlignKeys: function () {
+        if (this._alignKeyDown) window.removeEventListener('keydown', this._alignKeyDown);
+        this._alignKeyDown = null;
+      },
+      _valid: function (e) { return !!conRep(e) && (!cfg.onlyLine || e.type === 'line'); },
+      _add: function (e) {
+        if (!e || !this._valid(e)) return false;
+        if (this.picks.indexOf(e.id) < 0) this.picks.push(e.id);
+        return true;
+      },
+      onHover: function (p) {
+        this.hover = p;
+        this.hoverEnt = App.pick(p);
+      },
+      onTap: function (p) {
+        const e = App.pick(p);
+        if (!e) return;
+        if (!this._valid(e)) { App.toast(cfg.invalidTip); return; }
+        const i = this.picks.indexOf(e.id);
+        if (i >= 0) this.picks.splice(i, 1);
+        else this.picks.push(e.id);
+        App.updatePrompt();
+        App.refresh();
+      },
+      onDragStart: function (p) {
+        this.band = { x1: p.x, y1: p.y, x2: p.x, y2: p.y };
+      },
+      onDragMove: function (p) {
+        if (!this.band) return;
+        this.band.x2 = p.x;
+        this.band.y2 = p.y;
+        App.refresh();
+      },
+      onDragEnd: function () {
+        if (!this.band) return;
+        const b = this.band;
+        this.band = null;
+        const rect = { x1: Math.min(b.x1, b.x2), y1: Math.min(b.y1, b.y2), x2: Math.max(b.x1, b.x2), y2: Math.max(b.y1, b.y2) };
+        if (Math.abs(rect.x2 - rect.x1) < 1e-6 && Math.abs(rect.y2 - rect.y1) < 1e-6) return;
+        const self = this;
+        App.model.entitiesInRect(rect, true).forEach(function (e) { self._add(e); });
+        App.updatePrompt();
+        App.refresh();
+      },
+      onDragCancel: function () { this.band = null; },
+      onRender: function (ctx, R) {
+        if (this.band) {
+          R.previewRect({
+            x1: Math.min(this.band.x1, this.band.x2), y1: Math.min(this.band.y1, this.band.y2),
+            x2: Math.max(this.band.x1, this.band.x2), y2: Math.max(this.band.y1, this.band.y2)
+          });
+        }
+        (this.picks || []).forEach(function (id) {
+          const e = App.model.findById(id);
+          if (e) R.ghostEntity(e);
+        });
+        if (this.hoverEnt && (this.picks || []).indexOf(this.hoverEnt.id) < 0 && this._valid(this.hoverEnt)) {
+          R.ghostEntity(this.hoverEnt);
+        }
+        if (!alignable || App.params.almode !== 'point') return;
+        const C = global.CADConstraints;
+        if (!C || typeof C.alignPointOf !== 'function') return;
+        const pt = App.params.alpt || 'center';
+        const custom = pt === 'custom';
+        const pointOf = function (e) { return custom ? C.repPoint(e) : C.alignPointOf(e, pt); };
+        const drawCross = function (p, color, r, label) {
+          const s = R.screen(p);
+          ctx.save();
+          ctx.strokeStyle = color;
+          ctx.fillStyle = color;
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(s.x - r - 3, s.y); ctx.lineTo(s.x + r + 3, s.y);
+          ctx.moveTo(s.x, s.y - r - 3); ctx.lineTo(s.x, s.y + r + 3);
+          ctx.stroke();
+          if (label) {
+            ctx.font = '10px -apple-system, "PingFang SC", system-ui, sans-serif';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(label, s.x + r + 5, s.y - r - 7);
+          }
+          ctx.restore();
+        };
+        const ids = this.picks || [];
+        let ref = null;
+        ids.forEach(function (id, i) {
+          const e = App.model.findById(id);
+          if (!e) return;
+          const p = pointOf(e);
+          if (!p) return;
+          if (!ref) ref = p;
+          drawCross(p, i === 0 ? '#ffb454' : '#5ad1ff', i === 0 ? 7 : 5, i === 0 ? '基准' : '');
+        });
+        if (custom) {
+          const ax = Number(App.params.alx), ay = Number(App.params.aly);
+          if (isFinite(ax) && isFinite(ay)) {
+            ref = { x: ax, y: ay };
+            drawCross(ref, '#ffb454', 8, '目标锚点');
+          }
+        }
+        if (this.hoverEnt && ids.indexOf(this.hoverEnt.id) < 0) {
+          const hp = pointOf(this.hoverEnt);
+          if (hp) drawCross(hp, 'rgba(90, 209, 255, 0.55)', 4, '');
+        }
+        if (ref) {
+          const s = R.screen(ref);
+          ctx.save();
+          ctx.strokeStyle = 'rgba(255, 180, 84, 0.45)';
+          ctx.setLineDash([5, 5]);
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          if (cfg.type === 'halign') { ctx.moveTo(0, s.y); ctx.lineTo(R.W || 2000, s.y); }
+          else { ctx.moveTo(s.x, 0); ctx.lineTo(s.x, R.H || 2000); }
+          ctx.stroke();
+          ctx.restore();
+        }
+      },
+      applyParams: function () {
+        const C = global.CADConstraints;
+        if (!C) return;
+        let ids = this.picks.slice();
+        if (!ids.length && App.model.selectedEntities) {
+          ids = App.model.selectedEntities().map(function (e) { return e.id; }).filter(function (id) {
+            const e = App.model.findById(id);
+            return e && conRep(e) && (!cfg.onlyLine || e.type === 'line');
+          });
+        }
+        ids = ids.filter(function (id, i) { return ids.indexOf(id) === i; });
+        if (ids.length < 2) {
+          App.toast('请至少选择 2 个' + (cfg.onlyLine ? '直线' : '图形'));
+          return;
+        }
+        const pointMode = alignable && App.params.almode === 'point';
+        const extra = {};
+        let snapPx = 2;
+        if (pointMode) {
+          extra.pmode = 'point';
+          extra.ptype = App.params.alpt || 'center';
+          const tol = Number(App.params.altol);
+          extra.snap = isFinite(tol) && tol >= 0 ? tol : 5;
+          snapPx = extra.snap;
+          if (extra.ptype === 'custom') {
+            const ax = Number(App.params.alx), ay = Number(App.params.aly);
+            if (!isFinite(ax) || !isFinite(ay)) { App.toast('请输入有效的锚点坐标'); return; }
+            extra.anchor = { x: ax, y: ay };
+          }
+        }
+        const draft = Object.assign({ type: cfg.type, ids: ids }, extra);
+        const dev = C.deviation(App.model, draft);
+        commitConstraint(cfg.type, ids, extra);
+        if (dev != null) {
+          const devPx = dev * (App.view && App.view.scale ? App.view.scale : 1);
+          if (devPx <= snapPx + 1e-6) {
+            App.toast('已吸附到对齐点（偏差 ' + fmt(devPx) + 'px），已建立' + cfg.name + '约束');
+          } else {
+            App.toast('已应用' + cfg.name + (pointMode ? '（' + alignLabel(extra.ptype) + '）' : '') +
+              '，原偏差 ' + fmt(devPx) + 'px');
+          }
+        } else {
+          App.toast('已应用' + cfg.name + '约束（' + ids.length + ' 个图形）');
+        }
+        App.model.selected.clear();
+        ids.forEach(function (id) { App.model.selected.add(id); });
+        if (App.afterSelectionChange) App.afterSelectionChange();
+        this.reset();
+        App.updateParams && App.updateParams();
+        App.updatePrompt();
+        App.refresh();
+      }
+    });
+    return tool;
+  }
+
+  const hAlignConstraintTool = makeBatchConstraintTool({
+    id: 'chal', name: '水平对齐', icon: '⇔', type: 'halign', hint: '水平对齐',
+    invalidTip: '该图形不支持水平对齐'
+  });
+
+  const vAlignConstraintTool = makeBatchConstraintTool({
+    id: 'cval', name: '垂直对齐', icon: '⇕', type: 'valign', hint: '垂直对齐',
+    invalidTip: '该图形不支持垂直对齐'
+  });
+
+  const equalConstraintTool = makeBatchConstraintTool({
+    id: 'ceq', name: '等长', icon: '=', type: 'equal', onlyLine: true, hint: '等长约束',
+    invalidTip: '等长约束仅支持直线'
+  });
+
+  /* ---------- 相对垂直：目标元素相对参考元素顶部 / 中部 / 底部 + 偏移 ---------- */
+  const verticalRelativeTool = baseTool({
+    id: 'cvrel', name: '相对垂直', cat: 'constraint', icon: '⇳', dragType: 'tool', hoverLive: true,
+    prompt: function () {
+      const n = (this.picks || []).length;
+      if (!n) return '相对垂直：先点按目标元素，再点按参考元素；设置参考位置与偏移后点“确定”';
+      if (n === 1) return '已选目标元素：请点按参考元素，可相对其顶部 / 中部 / 底部偏移定位';
+      return '目标 → 参考已就绪：设置“参考位置 / 垂直偏移”后点“确定”';
+    },
+    params: function () {
+      return [
+        {
+          key: 'rvanchor', type: 'choice', label: '参考位置', def: 'middle', group: '相对垂直', apply: true,
+          options: [{ v: 'top', label: '顶部' }, { v: 'middle', label: '中部' }, { v: 'bottom', label: '底部' }]
+        },
+        { key: 'rvoffset', label: '垂直偏移', def: 0, min: -1000000, max: 1000000, group: '相对垂直' },
+        { key: 'cshow', type: 'toggle', label: '显示标记', def: true, group: '约束', apply: true }
+      ];
+    },
+    reset: function () {
+      this.picks = [];
+      this.hoverEnt = null;
+      this.hover = null;
+    },
+    activate: function () { this.reset(); },
+    deactivate: function () { this.reset(); },
+    _valid: function (e) { return !!conRep(e); },
+    onTap: function (p) {
+      const e = App.pick(p);
+      if (!e) { App.toast('请点按图形'); return; }
+      if (!this._valid(e)) { App.toast('该图形不支持相对垂直定位'); return; }
+      if ((this.picks || []).length >= 2) this.picks = [];
+      if (!this.picks.length) {
+        this.picks = [e.id];
+        App.toast('已选目标元素，请点按参考元素');
+      } else if (this.picks[0] === e.id) {
+        App.toast('目标元素与参考元素不能相同');
+        return;
+      } else {
+        this.picks.push(e.id);
+        App.toast('已选参考元素，设置偏移后点“确定”');
+      }
+      App.model.selected.clear();
+      this.picks.forEach(function (id) { App.model.selected.add(id); });
+      if (App.afterSelectionChange) App.afterSelectionChange();
+      App.updatePrompt();
+      App.refresh();
+    },
+    onHover: function (p) {
+      this.hover = p;
+      this.hoverEnt = App.pick(p);
+    },
+    onRender: function (ctx, R) {
+      const ids = this.picks || [];
+      ids.forEach(function (id) {
+        const e = App.model.findById(id);
+        if (e) R.ghostEntity(e);
+      });
+      if (this.hoverEnt && ids.indexOf(this.hoverEnt.id) < 0) R.ghostEntity(this.hoverEnt);
+      if (ids.length < 2) return;
+      const ref = App.model.findById(ids[1]);
+      const mov = App.model.findById(ids[0]);
+      if (!ref || !mov) return;
+      const rawB = Geo.entityBBox(ref);
+      const b = (rawB && isFinite(rawB.x1)) ? rawB
+        : { x1: Math.min(ref.x1, ref.x2), y1: Math.min(ref.y1, ref.y2), x2: Math.max(ref.x1, ref.x2), y2: Math.max(ref.y1, ref.y2) };
+      const anchor = App.params.rvanchor || 'middle';
+      const ay = anchor === 'top' ? b.y2 : (anchor === 'bottom' ? b.y1 : (b.y1 + b.y2) / 2);
+      const off = Number(App.params.rvoffset);
+      const offsetY = isFinite(off) ? off : 0;
+      const midX = (b.x1 + b.x2) / 2;
+      const s1 = R.screen({ x: b.x1, y: ay });
+      const s2 = R.screen({ x: b.x2, y: ay });
+      const sv = R.screen({ x: midX, y: ay });
+      const sv2 = R.screen({ x: midX, y: ay + offsetY });
+      const C = global.CADConstraints;
+      const mp = C && C.repPoint ? C.repPoint(mov) : null;
+      ctx.save();
+      ctx.strokeStyle = '#ffb454';
+      ctx.lineWidth = 1.2;
+      ctx.setLineDash([5, 4]);
+      ctx.beginPath();
+      ctx.moveTo(s1.x, s1.y);
+      ctx.lineTo(s2.x, s2.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(sv.x, sv.y);
+      ctx.lineTo(sv2.x, sv2.y);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(sv.x, sv.y, 3.5, 0, Math.PI * 2);
+      ctx.stroke();
+      if (Math.abs(sv2.y - sv.y) > 2) {
+        ctx.beginPath();
+        ctx.moveTo(sv2.x - 4, sv2.y + (sv2.y > sv.y ? -5 : 5));
+        ctx.lineTo(sv2.x, sv2.y);
+        ctx.lineTo(sv2.x + 4, sv2.y + (sv2.y > sv.y ? -5 : 5));
+        ctx.stroke();
+      }
+      if (mp) {
+        const sm = R.screen(mp);
+        ctx.strokeStyle = '#5ad1ff';
+        ctx.beginPath();
+        ctx.arc(sm.x, sm.y, 4, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.restore();
+    },
+    applyParams: function () {
+      const C = global.CADConstraints;
+      if (!C) { App.toast('约束模块不可用'); return; }
+      let ids = (this.picks || []).slice();
+      if (ids.length < 2) {
+        const sel = App.model.selectedEntities ? App.model.selectedEntities() : [];
+        if (sel.length >= 2) ids = [sel[0].id, sel[1].id];
+      }
+      if (ids.length < 2) { App.toast('请先点选目标元素和参考元素'); return; }
+      if (ids[0] === ids[1]) { App.toast('目标元素与参考元素不能相同'); return; }
+      const anchor = App.params.rvanchor || 'middle';
+      const offset = Number(App.params.rvoffset);
+      const err = C.validateVerticalRelative(App.model, { type: 'vrel', ids: ids, anchor: anchor, offset: offset });
+      if (err) { App.toast(err); return; }
+      const dev = C.deviation(App.model, { type: 'vrel', ids: ids, anchor: anchor, offset: offset });
+      commitConstraint('vrel', ids, { anchor: anchor, offset: offset });
+      App.model.selected.clear();
+      ids.forEach(function (id) { App.model.selected.add(id); });
+      const label = (C.vrelAnchors && C.vrelAnchors[anchor]) || '中部';
+      const devPx = dev == null ? 0 : dev * (App.view && App.view.scale ? App.view.scale : 1);
+      App.toast('已应用相对垂直：' + label + ' ' + (offset >= 0 ? '+' : '') + fmt(offset) +
+        (devPx > 2 ? '（原偏差 ' + fmt(devPx) + 'px）' : ''));
+      this.reset();
+      App.updateParams();
+      App.updatePrompt();
+      App.refresh();
+      if (App.afterSelectionChange) App.afterSelectionChange();
+    }
+  });
 
   const hConstraintTool = makeConstraintTool({
     id: 'ch', name: '水平', icon: 'H', type: 'horizontal',
@@ -3701,10 +4704,11 @@
   });
 
   const list = [
-    lineTool, centerTool, rectTool, polyTool, circleTool, arcTool, pointTool, angleLineTool, parallelTool, offsetTool,
-    selectTool, deleteTool, trimTool, filletTool, stretchTool, moveTool, arrayTool, mirrorTool, rotateTool,
+    lineTool, centerTool, rectTool, polyTool, contourTool, splineTool, circleTool, arcTool, pointTool, angleLineTool, parallelTool, offsetTool,
+    selectTool, deleteTool, trimTool, filletTool, stretchTool, moveTool, arrayTool, mirrorTool, rotateTool, splineEditTool,
     measureLengthTool, measureAngleTool, measureDistTool, measureCoordTool, propsTool, dimTool,
-    hConstraintTool, vConstraintTool, symmetricTool, collinearTool, tangentTool, distanceTool,
+    hConstraintTool, vConstraintTool, hAlignConstraintTool, vAlignConstraintTool, equalConstraintTool, verticalRelativeTool,
+    symmetricTool, collinearTool, tangentTool, distanceTool,
     parallelConstraintTool, fixedConstraintTool, angleConstraintTool, onLineConstraintTool,
     overlapConstraintTool, coincidentTool, constraintSettingsTool, constraintManagerTool,
     panTool

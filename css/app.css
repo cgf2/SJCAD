@@ -121,7 +121,14 @@ html, body {
   padding: 2px 8px;
   border-radius: 999px;
   font-size: 11.5px;
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  transition: filter .15s ease, transform .1s ease, box-shadow .15s ease;
 }
+.badge:hover { filter: brightness(1.12); box-shadow: 0 0 0 2px rgba(55, 200, 255, .25); }
+.badge:active { transform: scale(.95); }
+.badge:focus-visible { outline: 2px solid rgba(55, 200, 255, .8); outline-offset: 2px; }
 .prompt-text { color: var(--muted); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .prompt-toggle {
   flex: none;
@@ -606,6 +613,66 @@ select.prop-input { text-align: left; padding: 0 4px; }
 .help-body { font-size: 13px; color: var(--muted); line-height: 1.8; overflow-y: auto; }
 .help-body p { margin: 6px 0; color: var(--text); }
 .help-body ul { margin: 4px 0; padding-left: 18px; }
+.help-lead {
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.6;
+  padding: 0 2px;
+}
+.help-cards { display: flex; flex-direction: column; gap: 8px; padding: 2px 0 4px; }
+.help-card {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(55, 200, 255, .05), rgba(55, 200, 255, 0));
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color .15s ease, background .15s ease;
+}
+.help-card:hover { border-color: rgba(55, 200, 255, .55); background: var(--accent-soft); }
+.help-card:active { filter: brightness(1.08); }
+.help-card-title { font-size: 13.5px; font-weight: 600; color: var(--text); }
+.help-card-summary { font-size: 11.5px; line-height: 1.65; color: var(--muted); }
+.help-card-more { font-size: 11px; color: var(--accent); }
+.help-detail-card { max-width: 540px; }
+.help-detail-body { overflow-y: auto; padding-right: 2px; min-height: 0; }
+.help-sec { margin: 0 0 14px; }
+.help-sec:last-child { margin-bottom: 2px; }
+.help-sec-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: .02em;
+  margin-bottom: 4px;
+}
+.help-sec-body p { margin: 4px 0; }
+.help-sec-body ul, .help-sec-body ol { margin: 4px 0; padding-left: 18px; }
+.help-sec-body li { margin: 3px 0; }
+.help-links { display: flex; flex-wrap: wrap; gap: 8px; }
+.help-link {
+  border: 1px solid rgba(55, 200, 255, .38);
+  background: rgba(55, 200, 255, .1);
+  color: var(--accent);
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background .15s ease, border-color .15s ease;
+}
+.help-link:hover { background: rgba(55, 200, 255, .2); border-color: rgba(55, 200, 255, .6); }
+.help-link:active { background: rgba(55, 200, 255, .3); }
+@media (max-height: 560px) {
+  .modal-card { max-height: 94vh; }
+  .help-detail-card { max-height: 94vh; }
+}
 
 .sheet {
   position: fixed;

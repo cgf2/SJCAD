@@ -1035,7 +1035,11 @@
     angle: { name: '角度', icon: '∠', need: 2 },
     onLine: { name: '点在线上', icon: '⌖', need: 2 },
     overlap: { name: '重叠', icon: '⧉', need: 2 },
-    coincident: { name: '重合', icon: '⊙', need: 2 }
+    coincident: { name: '重合', icon: '⊙', need: 2 },
+    halign: { name: '水平对齐', icon: '⇔', need: 2 },
+    valign: { name: '垂直对齐', icon: '⇕', need: 2 },
+    vrel: { name: '相对垂直', icon: '⇳', need: 2 },
+    equal: { name: '等长', icon: '=', need: 2 }
   };
 
   function lineDir(line) {
@@ -1049,16 +1053,61 @@
     if (e.type === 'line') return Geo.lerp(e.p1, e.p2, 0.5);
     if (isCircleLike(e)) return { x: e.c.x, y: e.c.y };
     if (e.type === 'point') return { x: e.p.x, y: e.p.y };
-    if (e.type === 'rect' || e.type === 'poly') {
+    if (e.type === 'rect' || e.type === 'poly' || e.type === 'spline') {
       const b = Geo.entityBBox(e);
       return { x: (b.x1 + b.x2) / 2, y: (b.y1 + b.y2) / 2 };
     }
-    return null;
+    // 兼容以边界框描述的元素（文本框 / 图片 / 容器 / 自定义组件）
+    const fb = bboxSafe(e);
+    return fb ? { x: (fb.x1 + fb.x2) / 2, y: (fb.y1 + fb.y2) / 2 } : null;
+  }
+
+  /* ---------- 对齐参考点（点对齐） ---------- */
+  const ALIGN_POINTS = {
+    lt: '左上角', center: '中心点', rt: '右上角',
+    lb: '左下角', rb: '右下角', custom: '指定锚点'
+  };
+
+  /** 安全包围盒：优先使用元素自带边界框，兼容文本框 / 图片 / 容器 / 自定义组件 */
+  function bboxSafe(e) {
+    if (!e) return null;
+    if (typeof e.x1 === 'number' && typeof e.y1 === 'number' &&
+        typeof e.x2 === 'number' && typeof e.y2 === 'number') {
+      return {
+        x1: Math.min(e.x1, e.x2), y1: Math.min(e.y1, e.y2),
+        x2: Math.max(e.x1, e.x2), y2: Math.max(e.y1, e.y2)
+      };
+    }
+    const b = Geo.entityBBox(e);
+    return b && isFinite(b.x1) ? b : null;
+  }
+
+  /**
+   * 元素的对齐参考点；ptype=bounds 时沿用原有代表点，
+   * 其余按包围盒四角 / 中心取点（世界坐标 y 向上）
+   */
+  function alignPointOf(e, ptype) {
+    if (!e) return null;
+    if (!ptype || ptype === 'bounds' || ptype === 'custom') return repPoint(e);
+    const b = bboxSafe(e);
+    if (!b) return repPoint(e);
+    const cx = (b.x1 + b.x2) / 2, cy = (b.y1 + b.y2) / 2;
+    if (ptype === 'lt') return { x: b.x1, y: b.y2 };
+    if (ptype === 'rt') return { x: b.x2, y: b.y2 };
+    if (ptype === 'lb') return { x: b.x1, y: b.y1 };
+    if (ptype === 'rb') return { x: b.x2, y: b.y1 };
+    return { x: cx, y: cy };
+  }
+
+  /** 点对齐吸附阈值（像素），默认 5 */
+  function snapTolOf(c) {
+    const n = Number(c && c.snap);
+    return isFinite(n) && n >= 0 ? n : 5;
   }
 
   /* ---------- 重叠约束：基于包围盒的重叠区域 ---------- */
   function isClosedShape(e) {
-    return !!e && (e.type === 'circle' || e.type === 'rect' || e.type === 'poly');
+    return !!e && (e.type === 'circle' || e.type === 'rect' || e.type === 'poly' || (e.type === 'spline' && e.closed));
   }
   function bboxArea(b) { return Math.max(0, b.x2 - b.x1) * Math.max(0, b.y2 - b.y1); }
   function bboxCenter(b) { return { x: (b.x1 + b.x2) / 2, y: (b.y1 + b.y2) / 2 }; }
@@ -1542,6 +1591,190 @@
     });
   }
 
+  /** 对齐参考点：点对齐取包围盒角点 / 中心，指定锚点直接作为目标 */
+  function alignPointFor(model, c, e) {
+    if (c.pmode !== 'point') return repPoint(e);
+    if (c.ptype === 'custom') return repPoint(e);
+    return alignPointOf(e, c.ptype || 'center');
+  }
+
+  function alignRefOf(model, c) {
+    if (c.pmode === 'point' && c.ptype === 'custom' && c.anchor &&
+        isFinite(c.anchor.x) && isFinite(c.anchor.y)) {
+      return { x: c.anchor.x, y: c.anchor.y };
+    }
+    const ids = c.ids || [];
+    for (let i = 0; i < ids.length; i++) {
+      const p = alignPointFor(model, c, model.findById(ids[i]));
+      if (p) return p;
+    }
+    return null;
+  }
+
+  /** 水平 / 垂直对齐：以第一个可测图形为基准，平移其余图形的对齐参考点 */
+  function solveAxisAlign(model, c, axis) {
+    const ids = (c.ids || []).filter(function (id) { return !!model.findById(id); });
+    if (ids.length < 2) return false;
+    const ref = alignRefOf(model, c);
+    if (!ref) return false;
+    let moved = false;
+    ids.forEach(function (id) {
+      const e = model.findById(id);
+      const p = alignPointFor(model, c, e);
+      if (!p) return;
+      const dx = axis === 'x' ? ref.x - p.x : 0;
+      const dy = axis === 'y' ? ref.y - p.y : 0;
+      if (Math.abs(dx) < 1e-9 && Math.abs(dy) < 1e-9) return;
+      Geo.translateEntity(e, dx, dy);
+      moved = true;
+    });
+    return moved;
+  }
+  function solveHAlign(model, c) { return solveAxisAlign(model, c, 'y'); }
+  function solveVAlign(model, c) { return solveAxisAlign(model, c, 'x'); }
+
+  /* ---------- 相对垂直：目标元素相对参考元素顶部 / 中部 / 底部 + 偏移 ---------- */
+  const VREL_ANCHORS = { top: '顶部', middle: '中部', bottom: '底部' };
+
+  function vrelAnchorY(b, anchor) {
+    if (anchor === 'top') return b.y2;
+    if (anchor === 'bottom') return b.y1;
+    return (b.y1 + b.y2) / 2;
+  }
+
+  /**
+   * 校验相对垂直约束，返回错误文案；合法时返回 null
+   * @param {Object} model 文档模型
+   * @param {Object} c 约束对象 { type:'vrel', ids:[目标, 参考], anchor, offset }
+   */
+  function validateVerticalRelative(model, c) {
+    if (!model || !model.findById) return '约束模型不可用';
+    if (!c || !Array.isArray(c.ids) || c.ids.length < 2) return '需要同时指定目标元素与参考元素';
+    if (String(c.ids[0]) === String(c.ids[1])) return '目标元素与参考元素不能相同';
+    const moving = model.findById(c.ids[0]);
+    const ref = model.findById(c.ids[1]);
+    if (!moving) return '目标元素不存在';
+    if (!ref) return '参考元素不存在';
+    if (!bboxSafe(ref)) return '参考元素没有可用的边界范围';
+    if (!repPoint(moving)) return '目标元素不支持相对垂直定位';
+    if (c.anchor != null && !VREL_ANCHORS[c.anchor]) return '参考位置只能是顶部 / 中部 / 底部';
+    const off = Number(c.offset);
+    if (!isFinite(off)) return '垂直偏移必须是有效数值';
+    if (Math.abs(off) > 1000000) return '垂直偏移超出允许范围（±1000000）';
+    return null;
+  }
+
+  /** 计算目标元素应对齐到的 Y 坐标；参数非法时抛出明确错误 */
+  function verticalRelativeY(model, c) {
+    const err = validateVerticalRelative(model, c);
+    if (err) throw new Error('相对垂直约束：' + err);
+    const b = bboxSafe(model.findById(c.ids[1]));
+    return vrelAnchorY(b, c.anchor || 'middle') + Number(c.offset);
+  }
+
+  function solveVerticalRelative(model, c) {
+    if (validateVerticalRelative(model, c)) return false;
+    const moving = model.findById(c.ids[0]);
+    const p = repPoint(moving);
+    if (!p) return false;
+    const dy = verticalRelativeY(model, c) - p.y;
+    if (Math.abs(dy) < 1e-9) return false;
+    Geo.translateEntity(moving, 0, dy);
+    return true;
+  }
+
+  /**
+   * 创建相对垂直约束（对外 API，参数非法时抛出 Error）
+   * 与水平 / 垂直对齐保持一致：约束对象使用 type + ids，额外字段描述定位方式
+   * @param {Object} model 文档模型
+   * @param {{ids:string[], anchor?:string, offset?:number}} cfg
+   * @returns {Object} 已创建的约束对象
+   */
+  function addVerticalRelative(model, cfg) {
+    if (!model || !model.addConstraint) throw new Error('相对垂直约束：约束模型不可用');
+    const ids = cfg && cfg.ids ? cfg.ids.slice() : [];
+    const con = model.addConstraint({
+      type: 'vrel',
+      ids: ids.map(String),
+      anchor: cfg && cfg.anchor ? cfg.anchor : 'middle',
+      offset: Number(cfg && cfg.offset != null ? cfg.offset : 0)
+    });
+    const err = validateVerticalRelative(model, con);
+    if (err) {
+      model.removeConstraint(con.id);
+      throw new Error('相对垂直约束：' + err);
+    }
+    solveVerticalRelative(model, con);
+    return con;
+  }
+
+  /** 等长：所有直线以第一条直线长度为基准，绕各自中点缩放 */
+  function solveEqual(model, c) {
+    const ids = (c.ids || []).filter(function (id) { return !!model.findById(id); });
+    if (ids.length < 2) return false;
+    let refLen = null;
+    for (let i = 0; i < ids.length; i++) {
+      const e = model.findById(ids[i]);
+      if (e && e.type === 'line') {
+        const L = Geo.entityLength(e);
+        if (L > 1e-9) { refLen = L; break; }
+      }
+    }
+    if (!(refLen > 1e-9)) return false;
+    let moved = false;
+    ids.forEach(function (id) {
+      const e = model.findById(id);
+      if (!e || e.type !== 'line') return;
+      const cur = Geo.dist(e.p1, e.p2);
+      if (cur < 1e-9 || Math.abs(cur - refLen) < 1e-9) return;
+      const mid = Geo.lerp(e.p1, e.p2, 0.5);
+      const ux = (e.p2.x - e.p1.x) / cur;
+      const uy = (e.p2.y - e.p1.y) / cur;
+      e.p1 = { x: mid.x - ux * refLen / 2, y: mid.y - uy * refLen / 2 };
+      e.p2 = { x: mid.x + ux * refLen / 2, y: mid.y + uy * refLen / 2 };
+      moved = true;
+    });
+    return moved;
+  }
+
+  /** 约束偏差（世界单位）；无法度量时返回 null */
+  function deviationOf(model, c) {
+    const ids = (c.ids || []).filter(function (id) { return !!model.findById(id); });
+    let max = 0, count = 0;
+    if (c.type === 'halign' || c.type === 'valign') {
+      const axis = c.type === 'halign' ? 'y' : 'x';
+      const custom = c.pmode === 'point' && c.ptype === 'custom' && c.anchor &&
+        isFinite(c.anchor.x) && isFinite(c.anchor.y);
+      const ref = custom ? { x: c.anchor.x, y: c.anchor.y } : alignRefOf(model, c);
+      if (!ref) return null;
+      ids.forEach(function (id) {
+        const p = alignPointFor(model, c, model.findById(id));
+        if (!p) return;
+        max = Math.max(max, Math.abs(p[axis] - ref[axis]));
+        count++;
+      });
+    } else if (c.type === 'vrel') {
+      if (validateVerticalRelative(model, c)) return null;
+      const p = repPoint(model.findById(c.ids[0]));
+      if (!p) return null;
+      max = Math.abs(p.y - verticalRelativeY(model, c));
+      count = 1;
+    } else if (c.type === 'equal') {
+      let ref = null;
+      ids.forEach(function (id) {
+        const e = model.findById(id);
+        if (!e || e.type !== 'line') return;
+        const L = Geo.entityLength(e);
+        if (!ref) { ref = L; return; }
+        max = Math.max(max, Math.abs(L - ref));
+        count++;
+      });
+    } else {
+      return null;
+    }
+    return count ? max : null;
+  }
+
   const SOLVERS = {
     horizontal: solveHorizontal,
     vertical: solveVertical,
@@ -1554,14 +1787,34 @@
     angle: solveAngleConstraint,
     onLine: solveOnLine,
     overlap: solveOverlap,
-    coincident: solveCoincident
+    coincident: solveCoincident,
+    halign: solveHAlign,
+    valign: solveVAlign,
+    vrel: solveVerticalRelative,
+    equal: solveEqual
   };
+
+  /**
+   * @typedef {Object} VerticalRelativeConstraint
+   * @property {'vrel'} type 约束类型
+   * @property {string[]} ids [目标元素 id, 参考元素 id]，顺序固定
+   * @property {'top'|'middle'|'bottom'} anchor 参考元素上的对齐位置：顶部 / 中部 / 底部
+   * @property {number} offset 垂直偏移量（世界坐标，正值向上，负值向下，范围 ±1e6）
+   */
 
   const CADConstraints = {
     TYPES: TYPES,
     nameOf: function (type) { return (TYPES[type] || {}).name || type; },
     iconOf: function (type) { return (TYPES[type] || {}).icon || '?'; },
     repPoint: repPoint,
+    alignPointOf: alignPointOf,
+    alignPoints: ALIGN_POINTS,
+    snapTol: snapTolOf,
+    vrelAnchors: VREL_ANCHORS,
+    validateVerticalRelative: validateVerticalRelative,
+    verticalRelativeY: verticalRelativeY,
+    addVerticalRelative: addVerticalRelative,
+    deviation: deviationOf,
     isClosedShape: isClosedShape,
     overlapRatio: overlapRatio,
     endpointPoint: endpointPoint,
@@ -1614,6 +1867,14 @@
       return out;
     },
     anchorOf: function (model, c) {
+      if (c.type === 'halign' || c.type === 'valign') {
+        const ref = alignRefOf(model, c);
+        if (ref) return ref;
+      }
+      if (c.type === 'vrel') {
+        const p = repPoint(model.findById((c.ids || [])[0]));
+        if (p) return p;
+      }
       if (c.type === 'coincident') {
         const e = model.findById((c.ids || [])[0]);
         const p = endpointPoint(e, c.aIdx);
@@ -1666,6 +1927,16 @@
             ((Number(c.bIdx) || 0) + 1) + '</span>';
         } else if (c.type === 'fixed') {
           value = '<span class="con-mode">' + (c.onlyEndpoints ? '仅端点' : '整体') + '</span>';
+        } else if ((c.type === 'halign' || c.type === 'valign') && c.pmode === 'point') {
+          let label = ALIGN_POINTS[c.ptype] || '中心点';
+          if (c.ptype === 'custom' && c.anchor) {
+            label += ' ' + num(c.anchor.x) + ', ' + num(c.anchor.y);
+          }
+          value = '<span class="con-mode">' + label + ' · 吸附 ' + snapTolOf(c) + 'px</span>';
+        } else if (c.type === 'vrel') {
+          const off = Number(c.offset);
+          value = '<span class="con-mode">' + (VREL_ANCHORS[c.anchor] || '中部') + ' ' +
+            (off >= 0 ? '+' : '') + num(off) + '</span>';
         }
         html += '<div class="con-row" data-con-sel="' + c.id + '">' +
           '<div class="con-main">' +
@@ -1676,7 +1947,7 @@
           '<button class="mini danger" data-con-del="' + c.id + '">删除</button>' +
           '</div>';
       });
-      html += '<div class="hint">点按约束行可高亮对应图形；距离 / 角度 / 重叠比例约束可直接修改数值；重合约束在图形拖动后自动保持端点一致；固定约束的图形在后续求解中保持不动（“仅端点”模式只固定端点 / 圆心）；删除后约束解除。</div>';
+      html += '<div class="hint">点按约束行可高亮对应图形；距离 / 角度 / 重叠比例约束可直接修改数值；重合约束在图形拖动后自动保持端点一致；固定约束的图形在后续求解中保持不动（“仅端点”模式只固定端点 / 圆心）；水平 / 垂直对齐可在面板切换“边界对齐 / 点对齐”，点对齐支持左上 / 中心 / 右上 / 左下 / 右下与指定锚点，并可用数字键 1~5、0 快速切换；删除后约束解除。</div>';
       return html;
     },
     drawMarks: function (R, app) {
@@ -1691,23 +1962,48 @@
         let extra = '';
         if (c.type === 'distance') extra = ' ' + fmt(c.value);
         else if (c.type === 'angle') extra = ' ' + fmt(c.value) + '°';
+        else if (c.type === 'vrel') {
+          const off = Number(c.offset);
+          extra = ' ' + (VREL_ANCHORS[c.anchor] || '中部') + ' ' + (off >= 0 ? '+' : '') + fmt(off);
+        }
         else if (c.type === 'overlap') extra = c.mode === 'ratio' ? ' ' + fmt(c.value) + '%' : ' 完全';
         else if (c.type === 'coincident') extra = ' 重合';
-        const text = CADConstraints.iconOf(c.type) + extra;
+        const dev = CADConstraints.deviation(model, c);
+        const pointMode = (c.type === 'halign' || c.type === 'valign') && c.pmode === 'point';
+        if (pointMode) {
+          extra += ' ' + (ALIGN_POINTS[c.ptype] || '中心点') + ' ' + CADConstraints.snapTol(c) + 'px';
+        }
+        const tolPx = pointMode ? CADConstraints.snapTol(c) : 2;
+        const tol = tolPx / (app.view && app.view.scale ? app.view.scale : 1);
+        const state = dev == null ? null : dev <= tol;
+        const color = state === true ? '#3ddc97' : (state === false ? '#ff7a6b' : CON_COLOR);
+        const text = CADConstraints.iconOf(c.type) + extra + (state === true ? ' ✓' : (state === false ? ' !' : ''));
+        if (pointMode) {
+          ctx.save();
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 1.2;
+          ctx.beginPath();
+          ctx.moveTo(s.x - 5, s.y);
+          ctx.lineTo(s.x + 5, s.y);
+          ctx.moveTo(s.x, s.y - 5);
+          ctx.lineTo(s.x, s.y + 5);
+          ctx.stroke();
+          ctx.restore();
+        }
         ctx.save();
         ctx.font = '10px -apple-system, "PingFang SC", system-ui, sans-serif';
         const w = ctx.measureText(text).width;
         const x = s.x + 10;
         const y = s.y - 16 - (i % 3) * 17;
         ctx.fillStyle = 'rgba(13, 17, 23, 0.88)';
-        ctx.strokeStyle = CON_COLOR;
+        ctx.strokeStyle = color;
         ctx.lineWidth = 1;
         ctx.beginPath();
         if (ctx.roundRect) ctx.roundRect(x, y - 10, w + 10, 16, 5);
         else ctx.rect(x, y - 10, w + 10, 16);
         ctx.fill();
         ctx.stroke();
-        ctx.fillStyle = CON_COLOR;
+        ctx.fillStyle = color;
         ctx.textBaseline = 'middle';
         ctx.fillText(text, x + 5, y - 2);
         ctx.restore();

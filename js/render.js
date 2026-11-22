@@ -201,6 +201,16 @@
       if (ent.closed !== false) ctx.closePath();
       return true;
     }
+    if (ent.type === 'spline') {
+      const pts = Geo.splinePolyline(ent, 96);
+      if (pts.length < 2) return false;
+      pts.forEach(function (q, i) {
+        const s = this.screen(q);
+        if (i === 0) ctx.moveTo(s.x, s.y); else ctx.lineTo(s.x, s.y);
+      }, this);
+      if (ent.closed) ctx.closePath();
+      return true;
+    }
     return false;
   };
 
@@ -234,7 +244,7 @@
       return;
     }
     if (!this.pathEntity(ent)) return;
-    if (ent.type === 'rect' || ent.type === 'poly') this.fillEntity(ent);
+    if (ent.type === 'rect' || ent.type === 'poly' || (ent.type === 'spline' && ent.closed)) this.fillEntity(ent);
     ctx.save();
     ctx.strokeStyle = color;
     ctx.lineWidth = width;
@@ -269,7 +279,7 @@
   Renderer.prototype.previewEntity = function (ent) {
     if (!this.pathEntity(ent)) return;
     const ctx = this.ctx;
-    if (ent.type === 'rect' || ent.type === 'poly') this.fillEntity(ent);
+    if (ent.type === 'rect' || ent.type === 'poly' || (ent.type === 'spline' && ent.closed)) this.fillEntity(ent);
     ctx.save();
     ctx.strokeStyle = COLORS.preview;
     ctx.lineWidth = 1.6;
