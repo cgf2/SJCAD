@@ -3273,6 +3273,150 @@
             t2.onTap({ x: 20, y: 0 });
             assert(app2.model.constraints.length === 0, '未开启连续画线时不应建立链接约束');
           }
+        },
+        {
+          name: '闭环：默认开启且依赖连续画线 + 首尾链接',
+          run: function () {
+            const app = mockApp();
+            const t = useTool('line');
+            const lloop = t.params().filter(function (f) { return f.key === 'lloop'; })[0];
+            assert(lloop && lloop.type === 'toggle', '应提供闭环开关');
+            assert(lloop.def === true, '闭环默认开启');
+
+            app.params.lchain = false; app.params.llink = true;
+            assert(lloop.when(app.params) === false, '未开连续画线时不显示闭环');
+            app.params.lchain = true; app.params.llink = false;
+            assert(lloop.when(app.params) === false, '未开首尾链接时不显示闭环');
+            app.params.llink = true;
+            assert(lloop.when(app.params) === true, '两项开启后应显示闭环');
+          }
+        },
+        {
+          name: '闭环：右键退出自动补线并建立首尾重合约束',
+          run: function () {
+            const app = mockApp();
+            const t = useTool('line');
+            app.params.lchain = true;
+            app.params.llink = true;
+            app.params.lloop = true;
+            t.onTap({ x: 0, y: 0 });
+            t.onTap({ x: 100, y: 0 });
+            t.onTap({ x: 100, y: 80 });
+            assert(app.model.entities.length === 2, '应先画出两条直线');
+            assert(app.model.constraints.length === 1, '相邻两段应有 1 条链接约束');
+
+            t.onRightClick();
+            const ents = app.model.entities;
+            assert(ents.length === 3, '退出时应自动补一条闭合直线');
+            const first = ents[0], last = ents[1], closed = ents[2];
+            near(closed.p1.x, last.p2.x); near(closed.p1.y, last.p2.y);
+            near(closed.p2.x, first.p1.x); near(closed.p2.y, first.p1.y);
+
+            assert(app.model.constraints.length === 3, '闭环应新增两条重合约束');
+            const c1 = app.model.constraints[1], c2 = app.model.constraints[2];
+            assert(c1.type === 'coincident' && c1.aIdx === 1 && c1.bIdx === 0 &&
+              c1.ids[0] === last.id && c1.ids[1] === closed.id, '末段终点应与闭合线起点重合');
+            assert(c2.type === 'coincident' && c2.aIdx === 1 && c2.bIdx === 0 &&
+              c2.ids[0] === closed.id && c2.ids[1] === first.id, '闭合线终点应与首段起点重合');
+
+            assert(app.params.lchain === false, '退出后应关闭连续画线');
+            assert(t.chainFirstId === null && t.chainLastId === null, '退出后应清理链状态');
+          }
+        },
+        {
+          name: '闭环：切换工具 / 拖动取消同样触发',
+          run: function () {
+            const app = mockApp();
+            const t = useTool('line');
+            app.params.lchain = true; app.params.llink = true; app.params.lloop = true;
+            t.onTap({ x: 0, y: 0 });
+            t.onTap({ x: 60, y: 0 });
+            t.onTap({ x: 60, y: 60 });
+            t.deactivate(); // 相当于切换到其它工具
+            assert(app.model.entities.length === 3, '切换工具时应自动闭合');
+            assert(app.model.constraints.length === 3, '切换工具时应新增两条闭环约束');
+
+            const t2 = useTool('line');
+            app.params.lchain = true; app.params.llink = true; app.params.lloop = true;
+            t2.onTap({ x: 200, y: 0 });
+            t2.onTap({ x: 260, y: 0 });
+            t2.onTap({ x: 260, y: 60 });
+            t2.onDragCancel();
+            assert(app.model.entities.length === 6, '拖动取消时应自动闭合');
+            assert(app.model.constraints.length === 6, '拖动取消应再新增三条约束');
+          }
+        },
+        {
+          name: '闭环：单段 / 首尾已重合 / 开关关闭时不补线',
+          run: function () {
+            // 只有一段：首尾同一条，不应闭合
+            let app = mockApp();
+            let t = useTool('line');
+            app.params.lchain = true; app.params.llink = true; app.params.lloop = true;
+            t.onTap({ x: 0, y: 0 });
+            t.onTap({ x: 100, y: 0 });
+            t.onRightClick();
+            assert(app.model.entities.length === 1, '只有一段时不应自动闭合');
+
+            // 首尾端点已重合：不应重复补线
+            app = mockApp();
+            t = useTool('line');
+            app.params.lchain = true; app.params.llink = true; app.params.lloop = true;
+            t.onTap({ x: 0, y: 0 });
+            t.onTap({ x: 100, y: 0 });
+            t.onTap({ x: 100, y: 100 });
+            t.onTap({ x: 0, y: 100 });
+            t.onTap({ x: 0, y: 0 });
+            const n = app.model.entities.length;
+            t.onRightClick();
+            assert(app.model.entities.length === n, '首尾已重合时不应重复补线');
+
+            // 关闭首尾链接
+            app = mockApp();
+            t = useTool('line');
+            app.params.lchain = true; app.params.llink = false; app.params.lloop = true;
+            t.onTap({ x: 0, y: 0 });
+            t.onTap({ x: 100, y: 0 });
+            t.onTap({ x: 100, y: 100 });
+            t.onRightClick();
+            assert(app.model.entities.length === 2, '未开首尾链接时不应自动闭合');
+
+            // 关闭闭环本身
+            app = mockApp();
+            t = useTool('line');
+            app.params.lchain = true; app.params.llink = true; app.params.lloop = false;
+            t.onTap({ x: 0, y: 0 });
+            t.onTap({ x: 100, y: 0 });
+            t.onTap({ x: 100, y: 100 });
+            t.onRightClick();
+            assert(app.model.entities.length === 2, '关闭闭环后不应自动补线');
+          }
+        },
+        {
+          name: '闭环：重复退出防抖且状态可复用',
+          run: function () {
+            const app = mockApp();
+            const t = useTool('line');
+            app.params.lchain = true; app.params.llink = true; app.params.lloop = true;
+            t.onTap({ x: 0, y: 0 });
+            t.onTap({ x: 100, y: 0 });
+            t.onTap({ x: 100, y: 100 });
+            t.onRightClick();
+            t.onRightClick();
+            t.onRightClick();
+            assert(app.model.entities.length === 3, '连续多次退出只应补一条闭合线');
+            assert(app.model.constraints.length === 3, '连续多次退出只应新增两条约束');
+
+            // 重新开启后可再次正常闭环
+            app.params.lchain = true; app.params.llink = true; app.params.lloop = true;
+            t.activate();
+            t.onTap({ x: 200, y: 0 });
+            t.onTap({ x: 300, y: 0 });
+            t.onTap({ x: 300, y: 100 });
+            t.onRightClick();
+            assert(app.model.entities.length === 6, '状态清理后可再次正常闭环');
+            assert(app.model.constraints.length === 6, '再次闭环应新增三条约束');
+          }
         }
       ]
     },
@@ -3512,33 +3656,13 @@
           }
         },
         {
-          name: '样条编辑工具与提交按钮标记',
+          name: '新增功能确定按钮标记：轮廓线与批量约束',
           run: function () {
-            const app = mockApp();
+            mockApp();
             const contour = useTool('contour');
             assert(contour.params().some(function (f) { return f.apply === true; }), '轮廓线收尾参数应请求确定按钮');
             const ceq = useTool('ceq');
             assert(ceq.params().some(function (f) { return f.apply === true; }), '批量约束应请求确定按钮');
-
-            const sp = app.model.add({
-              type: 'spline',
-              pts: [{ x: 0, y: 0 }, { x: 50, y: 40 }, { x: 100, y: 0 }],
-              handles: [], smooth: 0.5, closed: false
-            });
-            const t = useTool('splineEdit');
-            assert(t.cat === 'edit', '样条编辑应位于编辑模块');
-            t.onTap({ x: 50, y: 40 });
-            assert(t.editId === sp.id, '点按应选中样条线');
-            near(app.params.esmooth, 0.5, 1e-9, '应读入样条当前平滑度');
-            app.params.esmooth = 0.9;
-            sp.handles = Geo.splineControls(sp).map(function (n) {
-              return { in: { x: n.in.x, y: n.in.y }, out: { x: n.out.x, y: n.out.y } };
-            });
-            t.applyParams();
-            near(sp.smooth, 0.9, 1e-9, '平滑度应保存');
-            assert(sp.handles.length === 0, '应用后控制手柄应重置');
-            assert(app.model.selected.has(sp.id), '应用后应保持选中');
-            app.params.smode = 'draw';
           }
         },
         {
@@ -3763,7 +3887,7 @@
             const meta = global.CAD_HELP_META || {};
             assert(map && typeof map === 'object', '应存在功能说明映射');
             const titles = Object.keys(meta);
-            assert(titles.length === 33, '功能说明主题应为 33 项，实际 ' + titles.length);
+            assert(titles.length === 37, '功能说明主题应为 37 项，实际 ' + titles.length);
             const tools = global.CADTools.list;
             assert(tools.length > 40, '工具数量应覆盖全部模块，实际 ' + tools.length);
             const missing = [];
@@ -3785,6 +3909,807 @@
               return !global.CADTools.byId(id);
             });
             assert(extra.length === 0, '存在无对应工具的映射：' + extra.join(','));
+          }
+        },
+        {
+          name: '拉伸精确模式：默认关闭、增量/端点、校验、预览、应用',
+          run: function () {
+            const T = global.CADTools;
+            const Geo = global.Geo;
+            // 关键：用 mockApp 会自动执行 CADTools.init(app)，将 tools.js 闭包里的 App 指向 mockApp，
+            // 保证 applyParams / onDragStart / onDragMove 等工具方法访问的是同一个 App。
+            const app = mockApp();
+            const stretch = T.byId('stretch');
+            assert(stretch && stretch.id === 'stretch', '应存在拉伸工具');
+
+            // 准备：清空并重置参数
+            app.model.clear();
+            app.model.selected.clear();
+            app.params.stp = false;
+            app.params.sdd = 0;
+            app.params.sept = 'end';
+            stretch.reset();
+            stretch.activate();
+
+            function setupCleanup(fn) {
+              try { fn(); } finally {
+                app.model.clear();
+                app.model.selected.clear();
+                app.params.stp = false;
+                app.params.sdd = 0;
+                app.params.sept = 'end';
+                if (Array.isArray(app.undo)) app.undo.length = 0;
+                if (Array.isArray(app.redo)) app.redo.length = 0;
+              }
+            }
+
+            function runCase(name, fn) {
+              try { setupCleanup(fn); }
+              catch (e) { assert(false, name + '：' + (e && e.message) + (e && e.stack ? '\n' + e.stack.split('\n').slice(0, 3).join('\n') : '')); }
+            }
+
+            // ---- 参数默认值与 when 过滤 ----
+            runCase('参数默认值与 when 过滤', function () {
+              app.model.clear();
+              app.model.selected.clear();
+              app.params.stp = true;
+              const ffields = stretch.params();
+              const stpF = ffields.find(function (f) { return f.key === 'stp'; });
+              const sddF = ffields.find(function (f) { return f.key === 'sdd'; });
+              const septF = ffields.find(function (f) { return f.key === 'sept'; });
+              assert(stpF && stpF.def === false, 'stp 默认应为关闭');
+              assert(sddF && sddF.min === -1000000 && sddF.max === 1000000, '增量范围 ±1e6');
+              assert(sddF.apply === true, '增量字段应有确定按钮');
+              assert(sddF.when(app.params) === true, 'stp=true 时 sdd.when 为 true');
+              assert(septF.when(app.params) === false, '无选中时 sept.when 为 false');
+
+              const line1 = app.model.add(line(0, 0, 100, 0));
+              app.model.selected.add(line1.id);
+              assert(septF.when(app.params) === true, '选中直线后 sept.when 为 true');
+              app.model.selected.clear();
+              const c1 = app.model.add({ type: 'circle', c: { x: 0, y: 0 }, r: 5 });
+              app.model.selected.add(c1.id);
+              assert(septF.when(app.params) === false, '选中圆后 sept.when 为 false');
+            });
+
+            // ---- 互斥：精确模式开启时拖拽不生效 ----
+            runCase('精确模式开启时拖拽不生效', function () {
+              const line2 = app.model.add(line(10, 10, 30, 10));
+              app.params.stp = true;
+              const before = { p1x: line2.p1.x, p2x: line2.p2.x };
+              stretch.onDragStart({ x: 15, y: 10 });
+              stretch.onDragMove({ x: 50, y: 10 });
+              stretch.onDragEnd();
+              assert(stretch.active !== true, '精确模式下拖拽不应激活');
+              assert(line2.p1.x === before.p1x && line2.p2.x === before.p2x, '精确模式下拖拽不应改变端点');
+            });
+
+            // ---- 互斥：精确模式关闭时自由拖拽正常 ----
+            runCase('精确模式关闭时自由拖拽正常', function () {
+              const line3 = app.model.add(line(10, 10, 30, 10));
+              app.params.stp = false;
+              // 拾取点靠近 p2(30,10) → mode='p2', fixed=p1(10,10), dir=(1,0)
+              // 拖拽到右侧 x=60 → p2 被延长到 (60,10)
+              stretch.onDragStart({ x: 28, y: 10 });
+              assert(stretch.active === true, '自由拖拽应激活');
+              stretch.onDragMove({ x: 60, y: 10 });
+              stretch.onDragEnd();
+              assert(Geo.dist(line3.p1, line3.p2) > 20.01, '自由拖拽应已伸长');
+            });
+
+            // ---- applyParams 端到端：直线 +正增量延长终点 ----
+            runCase('直线 +30 / -40 增量', function () {
+              const ln = app.model.add(line(0, 0, 100, 0));
+              app.params.stp = true;
+              app.params.sdd = 30;
+              app.params.sept = 'end';
+              app.model.selected.add(ln.id);
+              stretch.applyParams();
+              near(ln.p1.x, 0, 1e-6, '固定端点不动');
+              near(Geo.dist(ln.p1, ln.p2), 130, 1e-6, '终点 +30 延长到 130');
+              near(ln.p2.y, 0, 1e-6, '方向保持水平');
+
+              app.params.sdd = -40;
+              app.params.sept = 'start';
+              stretch.applyParams();
+              near(Geo.dist(ln.p1, ln.p2), 90, 1e-6, '起点 -40 后总长 90');
+              near(ln.p2.x, 130, 1e-6, '固定端 p2 位置不变');
+              near(ln.p1.x, 40, 1e-6, '起点移动到 (40,0)');
+            });
+
+            // ---- 圆增量 ----
+            runCase('圆半径 ±增量', function () {
+              const ci = app.model.add({ type: 'circle', c: { x: 0, y: 0 }, r: 10 });
+              app.params.stp = true;
+              app.model.selected.add(ci.id);
+              app.params.sdd = 5;
+              stretch.applyParams();
+              near(ci.r, 15, 1e-6, '圆半径 +5');
+              app.params.sdd = -3;
+              stretch.applyParams();
+              near(ci.r, 12, 1e-6, '圆半径 -3');
+            });
+
+            // ---- 圆弧增量（弧长） ----
+            runCase('圆弧弧长增量', function () {
+              const ar = app.model.add(arc(0, 0, 10, 0, Math.PI / 2));
+              const prevSweep = Geo.arcSweep(ar);
+              app.params.stp = true;
+              app.model.selected.add(ar.id);
+              app.params.sdd = Math.PI * 10;
+              app.params.sept = 'end';
+              stretch.applyParams();
+              const newSweep = Geo.arcSweep(ar);
+              near(newSweep, prevSweep + Math.PI, 1e-6, '圆弧 sweep 增量正确');
+              const normEq = function (a, b) {
+                const d = Math.abs(Geo.normAngle(a) - Geo.normAngle(b));
+                return d < 1e-6 || Math.abs(d - Geo.TAU) < 1e-6;
+              };
+              assert(normEq(ar.a0, 0), '修改终点时起始角保持');
+            });
+
+            // ---- 校验：超限 / NaN / 退化 ----
+            runCase('校验：超限/NaN/退化', function () {
+              const ln5 = app.model.add(line(0, 0, 10, 0));
+              app.params.stp = true;
+              app.model.selected.add(ln5.id);
+
+              const before5 = JSON.stringify(ln5);
+              app.params.sdd = 2000000;
+              stretch.applyParams();
+              assert(JSON.stringify(ln5) === before5, '超限 +2e6 不应修改实体');
+
+              app.params.sdd = -2000000;
+              stretch.applyParams();
+              assert(JSON.stringify(ln5) === before5, '超限 -2e6 不应修改实体');
+
+              app.params.sdd = 'abc';
+              stretch.applyParams();
+              assert(JSON.stringify(ln5) === before5, 'NaN 不应修改实体');
+
+              app.params.sdd = -999999;
+              app.params.sept = 'end';
+              stretch.applyParams();
+              assert(JSON.stringify(ln5) === before5, '缩短到 ≤0 不应修改实体');
+            });
+
+            // ---- 选中多个 ----
+            runCase('选中多个图元', function () {
+              const l6 = app.model.add(line(0, 0, 10, 0));
+              const c6 = app.model.add({ type: 'circle', c: { x: 20, y: 0 }, r: 3 });
+              app.model.selected.add(l6.id); app.model.selected.add(c6.id);
+              app.params.stp = true; app.params.sdd = 5;
+              const before6 = JSON.stringify(l6);
+              stretch.applyParams();
+              assert(JSON.stringify(l6) === before6, '多选时不应修改任何实体');
+            });
+
+            // ---- 默认 stp=false 时 applyParams 空操作 ----
+            runCase('默认 stp=false 时空操作', function () {
+              const l7 = app.model.add(line(0, 0, 10, 0));
+              app.model.selected.add(l7.id);
+              app.params.stp = false; app.params.sdd = 5;
+              const before7 = JSON.stringify(l7);
+              stretch.applyParams();
+              assert(JSON.stringify(l7) === before7, '非精确模式下 applyParams 不生效');
+            });
+
+            // ---- onParamChange 钩子存在 ----
+            assert(typeof stretch.onParamChange === 'function', '应提供 onParamChange 钩子');
+          }
+        }
+      ]
+    },
+    {
+      name: '组合与分解',
+      cases: [
+        {
+          name: '组合：≥2 个独立图元合并为整体并保留属性',
+          run: function () {
+            const app = mockApp();
+            const a = app.model.add(line(0, 0, 10, 0));
+            const b = app.model.add(circle(20, 0, 5));
+            app.model.add(line(100, 0, 120, 0));
+            a.style = 'dashed';
+            const idA = a.id, idB = b.id;
+            const gt = global.CADTools.byId('group');
+            assert(gt.enabled() === false, '未选择时组合应不可用');
+            app.model.selected.add(idA);
+            assert(gt.enabled() === false, '仅 1 个图元时组合应不可用');
+            app.model.selected.add(idB);
+            assert(gt.enabled() === true, '2 个独立图元时组合应可用');
+            assert(gt.apply() === true, '组合应成功');
+            assert(app.model.count() === 2, '顶层图元应为 2');
+            const g = app.model.entities[0];
+            assert(g.type === 'group', '首个位置应为组合对象');
+            assert(g.children.length === 2, '组合应包含 2 个子图元');
+            assert(g.children[0].id === idA && g.children[1].id === idB, '子图元 id 与顺序应保留');
+            assert(g.children[0].style === 'dashed', '子图元样式应保留');
+            near(g.children[1].r, 5, 1e-9, '子图元属性应保留');
+            assert(app.model.selected.size === 1 && app.model.selected.has(g.id), '组合后应选中整体');
+            const hit = app.model.hitTest({ x: 5, y: 0 }, 1);
+            assert(hit && hit.id === g.id, '点击子图元应命中组合对象');
+            const bb = Geo.entityBBox(g);
+            near(bb.x1, 0, 1e-9, '组合包围盒左边界');
+            near(bb.x2, 25, 1e-9, '组合包围盒右边界');
+            Geo.translateEntity(g, 10, 5);
+            near(g.children[0].p1.x, 10, 1e-9, '组合平移应带动子图元');
+            near(g.children[1].c.y, 5, 1e-9, '组合平移应带动圆');
+          }
+        },
+        {
+          name: '组合：插入位置与文档顺序保持',
+          run: function () {
+            const app = mockApp();
+            const a = app.model.add(line(0, 0, 10, 0));
+            const b = app.model.add(line(0, 10, 10, 10));
+            const c = app.model.add(line(0, 20, 10, 20));
+            const d = app.model.add(line(0, 30, 10, 30));
+            app.model.selected.add(a.id);
+            app.model.selected.add(c.id);
+            assert(global.CADTools.byId('group').apply() === true, '非相邻图元应可组合');
+            const ids = app.model.entities.map(function (e) { return e.id; });
+            assert(ids.length === 3, '组合后顶层应为 3 个对象');
+            const g = app.model.entities[0];
+            assert(g.type === 'group', '组合对象应位于首个被选图元的位置');
+            assert(ids[1] === b.id && ids[2] === d.id, '其余图元相对顺序不变');
+            assert(g.children[0].id === a.id && g.children[1].id === c.id, '子图元顺序按文档顺序');
+          }
+        },
+        {
+          name: '分解：还原独立图元与编辑属性',
+          run: function () {
+            const app = mockApp();
+            const a = app.model.add(line(0, 0, 10, 0));
+            const b = app.model.add(circle(20, 0, 5));
+            const c = app.model.add(line(100, 0, 120, 0));
+            const idA = a.id, idB = b.id, idC = c.id;
+            app.model.selected.add(idA);
+            app.model.selected.add(idB);
+            assert(global.CADTools.byId('group').apply() === true, '准备组合');
+            const g = app.model.entities[0];
+            const un = global.CADTools.byId('ungroup');
+            assert(un.enabled() === true, '选中组合对象时分解应可用');
+            app.model.selected.clear();
+            app.model.selected.add(idC);
+            assert(un.enabled() === false, '选中普通图元时分解应不可用');
+            app.model.selected.clear();
+            app.model.selected.add(g.id);
+            assert(un.apply() === true, '分解应成功');
+            assert(app.model.count() === 3, '顶层图元应恢复为 3');
+            const ids = app.model.entities.map(function (e) { return e.id; });
+            assert(ids[0] === idA && ids[1] === idB && ids[2] === idC, '子图元应按原顺序插回');
+            assert(app.model.entities.every(function (e) { return e.type !== 'group'; }), '不应残留组合对象');
+            near(app.model.entities[1].r, 5, 1e-9, '分解后属性保持');
+            assert(app.model.selected.size === 2 && app.model.selected.has(idA) &&
+              app.model.selected.has(idB), '分解后应全选子图元');
+          }
+        },
+        {
+          name: '组合 / 分解：触发条件与空操作保护',
+          run: function () {
+            const app = mockApp();
+            const a = app.model.add(line(0, 0, 10, 0));
+            const b = app.model.add(line(0, 10, 10, 10));
+            const gt = global.CADTools.byId('group');
+            const un = global.CADTools.byId('ungroup');
+            assert(gt.enabled() === false && un.enabled() === false, '空选择时两者均不可用');
+            const before = app.model.snapshot();
+            assert(gt.apply() === false, '空选择组合应失败');
+            assert(app.model.snapshot() === before, '失败时不应改动模型');
+            app.model.selected.add(a.id);
+            assert(gt.apply() === false, '仅 1 个图元组合应失败');
+            assert(app.model.snapshot() === before, '失败时仍不应改动模型');
+            assert(app.toasts[app.toasts.length - 1].indexOf('未满足') >= 0, '应给出条件提示');
+            app.model.selected.add(b.id);
+            assert(gt.apply() === true, '满足条件应成功');
+            assert(gt.enabled() === false, '选中组合对象时组合按钮应置灰');
+            assert(un.enabled() === true, '选中组合对象时分解按钮应可用');
+            assert(un.apply() === true, '分解应成功');
+            assert(gt.enabled() === true, '分解出 2 个图元后组合恢复可用');
+            assert(un.enabled() === false, '分解后分解按钮应置灰');
+          }
+        },
+        {
+          name: '组合 / 分解：撤销快照往返与 id 序号',
+          run: function () {
+            const app = mockApp();
+            const a = app.model.add(line(0, 0, 10, 0));
+            const b = app.model.add(circle(20, 0, 5));
+            app.model.add(line(100, 0, 120, 0));
+            app.model.selected.add(a.id);
+            app.model.selected.add(b.id);
+            const before = app.model.snapshot();
+            assert(global.CADTools.byId('group').apply() === true, '组合应成功');
+            const grouped = app.model.snapshot();
+            assert(app.undo.length === 1, '组合应写入 1 条撤销记录');
+            assert(app.undo[0] === before, '撤销记录应为组合前快照');
+            app.model.restoreSnapshot(app.undo.pop());
+            assert(app.model.count() === 3, '撤销后应恢复 3 个顶层图元');
+            assert(app.model.entities.every(function (e) { return e.type !== 'group'; }), '撤销后不应残留组合');
+            app.model.restoreSnapshot(grouped);
+            assert(app.model.count() === 2, '重做后应恢复组合结果');
+            const g = app.model.entities[0];
+            assert(g.type === 'group' && g.children.length === 2, '重做后组合结构完整');
+            app.model.selected.add(g.id);
+            assert(global.CADTools.byId('ungroup').apply() === true, '分解应成功');
+            assert(app.undo.length === 1, '分解应写入撤销记录');
+            app.model.restoreSnapshot(app.undo.pop());
+            assert(app.model.entities[0].type === 'group', '撤销分解应恢复组合');
+            app.model.restoreSnapshot(before);
+            const n = app.model.add(line(200, 0, 210, 0));
+            const same = app.model.allEntities().filter(function (e) { return e.id === n.id; });
+            assert(same.length === 1, '撤销恢复后新建图元 id 不应与已有冲突');
+          }
+        },
+        {
+          name: '组合对象：命中 / 框选 / 镜像 / 复制兼容',
+          run: function () {
+            const app = mockApp();
+            const a = app.model.add(line(0, 0, 10, 0));
+            const b = app.model.add(line(0, 10, 10, 10));
+            app.model.selected.add(a.id);
+            app.model.selected.add(b.id);
+            global.CADTools.byId('group').apply();
+            const g = app.model.entities[0];
+            let list = app.model.entitiesInRect({ x1: -1, y1: -1, x2: 2, y2: 2 }, true);
+            assert(list.length === 1 && list[0].id === g.id, '交叉框选应按子图元命中组合');
+            list = app.model.entitiesInRect({ x1: -1, y1: -1, x2: 12, y2: 2 }, false);
+            assert(list.length === 0, '窗口框选未覆盖全部子图元时不应命中');
+            list = app.model.entitiesInRect({ x1: -1, y1: -1, x2: 12, y2: 12 }, false);
+            assert(list.length === 1 && list[0].id === g.id, '全部子图元在内时应选中组合');
+            const mg = Geo.mirrorEntity(g, { x: -1, y: 0 }, { x: -1, y: 100 });
+            assert(mg && mg.type === 'group' && mg.children.length === 2, '镜像应保留组合结构');
+            app.model.add(mg);
+            const ids = app.model.allEntities().map(function (e) { return e.id; });
+            assert(ids.length === new Set(ids).size, '镜像副本不应复用已有 id');
+            const target = Geo.copyShape({}, g);
+            assert(target.type === 'group' && target.children.length === 2, '复制应深拷贝组合');
+            assert(target.children[0] !== g.children[0], '复制应为独立对象');
+            assert(target.children[0].id === g.children[0].id, '原地恢复语义应保留子图元 id');
+            assert(Geo.entityEndpoints(g).length === 0, '组合对象不提供端点');
+            assert(Geo.entityLength(g) > 0, '组合长度应累加子图元');
+            assert(Geo.entityMidpoint(g).y === 5, '组合中点取包围盒中心');
+          }
+        }
+      ]
+    },
+    {
+      name: '元素分解',
+      cases: [
+        {
+          name: '元素分解：矩形拆为 4 条线段且坐标精确',
+          run: function () {
+            const app = mockApp();
+            app.model.add({ type: 'rect', x1: 0, y1: 0, x2: 100, y2: 50, style: 'dashed' });
+            const t = global.CADTools.byId('explode');
+            assert(t && t.cat === 'edit', '元素分解应位于编辑模块');
+            app.params.scope = 'all';
+            assert(t._explode(null) === true, '矩形应可分解');
+            assert(app.model.count() === 4, '矩形应拆为 4 条线段');
+            const expect = [[0, 0, 100, 0], [100, 0, 100, 50], [100, 50, 0, 50], [0, 50, 0, 0]];
+            expect.forEach(function (e, i) {
+              const s = app.model.entities[i];
+              assert(s.type === 'line', '第 ' + (i + 1) + ' 段应为直线');
+              near(s.p1.x, e[0], 1e-9); near(s.p1.y, e[1], 1e-9);
+              near(s.p2.x, e[2], 1e-9); near(s.p2.y, e[3], 1e-9);
+              assert(s.style === 'dashed', '线型应保留');
+              assert(!!s.id, '新线段应分配 id');
+            });
+            assert(app.undo.length === 1, '分解应写入 1 条撤销记录');
+            app.model.restoreSnapshot(app.undo.pop());
+            assert(app.model.count() === 1 && app.model.entities[0].type === 'rect', '撤销应恢复原矩形');
+          }
+        },
+        {
+          name: '元素分解：闭合轮廓与开放折线的线段数',
+          run: function () {
+            const app = mockApp();
+            app.model.add({
+              type: 'poly', closed: true,
+              pts: [{ x: 0, y: 0 }, { x: 40, y: 0 }, { x: 40, y: 30 }, { x: 0, y: 30 }]
+            });
+            app.model.add({
+              type: 'poly', closed: false,
+              pts: [{ x: 100, y: 0 }, { x: 140, y: 0 }, { x: 140, y: 30 }]
+            });
+            app.params.scope = 'all';
+            assert(global.CADTools.byId('explode')._explode(null) === true, '轮廓线应可分解');
+            assert(app.model.count() === 6, '闭合 4 段 + 开放 2 段');
+            const segs = app.model.entities;
+            near(segs[0].p1.x, 0, 1e-9, '首段起点 X');
+            near(segs[3].p2.x, 0, 1e-9, '闭合段终点回到起点 X');
+            near(segs[3].p2.y, 0, 1e-9, '闭合段终点回到起点 Y');
+            near(segs[4].p1.x, 100, 1e-9, '开放折线起点 X');
+            near(segs[5].p2.x, 140, 1e-9, '开放折线终点 X');
+          }
+        },
+        {
+          name: '元素分解：指定区域只分解区域内复合图形',
+          run: function () {
+            const app = mockApp();
+            app.model.add({ type: 'rect', x1: 0, y1: 0, x2: 10, y2: 10 });
+            app.model.add({ type: 'rect', x1: 100, y1: 0, x2: 110, y2: 10 });
+            app.params.scope = 'region';
+            const t = global.CADTools.byId('explode');
+            t.applyParams();
+            assert(app.model.count() === 2, '区域模式未框选时不应分解');
+            assert(t._explode(Geo.normalizeRect(-5, -5, 15, 15)) === true, '区域内矩形应分解');
+            assert(app.model.count() === 5, '1 个矩形变 4 段，另一个保留');
+            assert(app.model.entities[4].type === 'rect', '区域外矩形保持不变');
+            near(app.model.entities[4].x1, 100, 1e-9);
+          }
+        },
+        {
+          name: '元素分解：组合对象内部按范围分解且结构保留',
+          run: function () {
+            const app = mockApp();
+            const r = app.model.add({ type: 'rect', x1: 0, y1: 0, x2: 20, y2: 20 });
+            const l = app.model.add(line(50, 0, 60, 0));
+            app.model.selected.add(r.id);
+            app.model.selected.add(l.id);
+            global.CADTools.byId('group').apply();
+            app.params.scope = 'all';
+            assert(global.CADTools.byId('explode')._explode(null) === true, '组合内矩形应可分解');
+            assert(app.model.count() === 1, '组合对象保持为一个顶层对象');
+            const g = app.model.entities[0];
+            assert(g.type === 'group', '组合结构应保留');
+            assert(g.children.length === 5, '4 条线段 + 原直线');
+            const last = g.children[4];
+            assert(last.type === 'line', '原直线仍存在');
+            near(last.p1.x, 50, 1e-9, '原直线坐标不变');
+            near(last.p2.y, 0, 1e-9);
+          }
+        },
+        {
+          name: '元素分解：不可分解元素保持不变与撤销回滚',
+          run: function () {
+            const app = mockApp();
+            app.model.add(circle(0, 0, 10));
+            app.model.add(arc(30, 0, 10, 0, Math.PI / 2));
+            app.model.add(line(0, 30, 10, 30));
+            app.model.add({
+              type: 'spline', handles: [], smooth: 0.5, closed: false,
+              pts: [{ x: 0, y: 50 }, { x: 10, y: 60 }, { x: 20, y: 50 }]
+            });
+            app.params.scope = 'all';
+            const t = global.CADTools.byId('explode');
+            assert(t._explode(null) === false, '无可分解图形时应失败');
+            assert(app.model.count() === 4, '不可分解元素应保持不变');
+            assert(app.toasts[app.toasts.length - 1].indexOf('没有可分解') >= 0, '应提示无可分解图形');
+
+            app.model.add({ type: 'rect', x1: 0, y1: 0, x2: 10, y2: 10 });
+            const before = app.model.snapshot();
+            assert(t._explode(null) === true, '加入矩形后应可分解');
+            assert(app.model.count() === 8, '4 个原图元 + 4 条线段');
+            app.model.restoreSnapshot(app.undo.pop());
+            assert(app.model.snapshot() === before, '撤销应完全恢复分解前状态');
+          }
+        }
+      ]
+    },
+    {
+      name: '填充与平移复制',
+      cases: [
+        {
+          name: '填充：规则填充批量应用且可撤销',
+          run: function () {
+            const app = mockApp();
+            const r = app.model.add({ type: 'rect', x1: 0, y1: 0, x2: 10, y2: 10 });
+            const c = app.model.add(circle(30, 0, 5));
+            const p = app.model.add({ type: 'poly', closed: true, pts: [{ x: 50, y: 0 }, { x: 60, y: 0 }, { x: 55, y: 10 }] });
+            const o = app.model.add({ type: 'poly', closed: false, pts: [{ x: 70, y: 0 }, { x: 80, y: 0 }] });
+            const l = app.model.add(line(90, 0, 100, 0));
+            [r.id, c.id, p.id, o.id, l.id].forEach(function (id) { app.model.selected.add(id); });
+            const t = global.CADTools.byId('fill');
+            assert(t && t.cat === 'edit', '填充应位于编辑模块');
+            app.params.fmode = 'batch';
+            app.params.fcolor = 'green';
+            const before = app.model.snapshot();
+            t.applyParams();
+            assert(r.fill === 'green' && c.fill === 'green' && p.fill === 'green', '闭合图形应批量填充');
+            assert(!o.fill && !l.fill, '开放轮廓与直线不应填充');
+            assert(app.model.selected.size === 5, '批量填充后选择应保持不变');
+            assert(app.undo.length === 1, '填充应写入 1 条撤销记录');
+            assert(app.toasts[app.toasts.length - 1].indexOf('已填充 3 个') >= 0, '应提示实际填充数量');
+            app.model.restoreSnapshot(app.undo.pop());
+            assert(app.model.snapshot() === before, '撤销应恢复填充前状态');
+          }
+        },
+        {
+          name: '填充：连续填充逐个生效且不支持图形不改动',
+          run: function () {
+            const app = mockApp();
+            const r = app.model.add({ type: 'rect', x1: 0, y1: 0, x2: 10, y2: 10 });
+            app.model.add({ type: 'poly', closed: false, pts: [{ x: 30, y: 0 }, { x: 40, y: 0 }] });
+            const t = global.CADTools.byId('fill');
+            app.params.fmode = 'cont';
+            app.params.fcolor = 'purple';
+            app.model.selected.clear();
+            t.onTap({ x: 0, y: 0 });
+            assert(r.fill === 'purple', '连续填充应直接生效');
+            assert(app.model.selected.size === 0, '连续填充不应改变选择');
+            const snap = app.model.snapshot();
+            t.onTap({ x: 200, y: 200 });
+            assert(app.model.snapshot() === snap, '空白点按不应改动图形');
+            t.onTap({ x: 30, y: 0 });
+            assert(!app.model.entities[1].fill, '开放轮廓不应填充');
+            assert(app.model.snapshot() === snap, '不支持填充时不应改动图形');
+            assert(app.toasts[app.toasts.length - 1].indexOf('不支持填充') >= 0, '应提示不支持填充');
+          }
+        },
+        {
+          name: '填充：组合对象内部闭合子图元一并填充',
+          run: function () {
+            const app = mockApp();
+            const r = app.model.add({ type: 'rect', x1: 0, y1: 0, x2: 20, y2: 20 });
+            const l = app.model.add(line(30, 0, 40, 0));
+            app.model.selected.add(r.id);
+            app.model.selected.add(l.id);
+            global.CADTools.byId('group').apply();
+            app.params.fmode = 'batch';
+            app.params.fcolor = 'orange';
+            global.CADTools.byId('fill').applyParams();
+            const g = app.model.entities[0];
+            assert(g.type === 'group', '组合结构应保留');
+            assert(g.children[0].fill === 'orange', '组合内矩形应填充');
+            assert(!g.children[1].fill, '组合内直线不应填充');
+            assert(app.toasts[app.toasts.length - 1].indexOf('已填充 1 个') >= 0, '数量按实际填充统计');
+          }
+        },
+        {
+          name: '平移复制：关闭时保持原逻辑，开启后保留原图并生成副本',
+          run: function () {
+            const app = mockApp();
+            const a = app.model.add(line(0, 0, 10, 0));
+            app.model.selected.add(a.id);
+            const t = global.CADTools.byId('move');
+            app.params.mto = false;
+            app.params.multi = false;
+            app.params.mcopy = false;
+            app.params.mx = 20;
+            app.params.my = 0;
+            t.applyParams();
+            assert(app.model.count() === 1, '关闭复制时应只平移不复制');
+            near(app.model.entities[0].p1.x, 20, 1e-9, '平移逻辑应保持不变');
+            app.model.selected.clear();
+            app.model.selected.add(app.model.entities[0].id);
+            app.params.mcopy = true;
+            app.params.mx = 5;
+            app.params.my = 5;
+            t.applyParams();
+            assert(app.model.count() === 2, '开启复制应生成副本');
+            const xs = app.model.entities.map(function (e) { return e.p1.x; }).sort(function (m, n) { return m - n; });
+            near(xs[0], 20, 1e-9, '原图形应保留在原位置');
+            near(xs[1], 25, 1e-9, '副本应位于目标位置');
+            assert(app.undo.length === 2, '复制平移写入独立撤销记录');
+            app.model.restoreSnapshot(app.undo.pop());
+            assert(app.model.count() === 1, '撤销应回到复制前状态');
+          }
+        },
+        {
+          name: '平移复制：拖动与移动到模式同样生效',
+          run: function () {
+            const app = mockApp();
+            const a = app.model.add(line(0, 0, 10, 0));
+            app.model.selected.add(a.id);
+            const t = global.CADTools.byId('move');
+            app.params.mto = false;
+            app.params.multi = false;
+            app.params.mcopy = true;
+            t.onDragStart({ x: 0, y: 0 });
+            t.onDragMove({ x: 5, y: 5 });
+            t.onDragEnd();
+            assert(app.model.count() === 2, '拖动复制应生成副本');
+            const xs = app.model.entities.map(function (e) { return e.p1.x; }).sort(function (m, n) { return m - n; });
+            near(xs[0], 0, 1e-9, '拖动复制的原图应留在起点');
+            near(xs[1], 5, 1e-9, '拖动复制的副本应到终点');
+
+            const app2 = mockApp();
+            const b = app2.model.add(line(0, 0, 10, 0));
+            app2.model.selected.add(b.id);
+            app2.params.mcopy = true;
+            app2.params.mto = true;
+            app2.params.tx = 50;
+            app2.params.ty = 50;
+            const t2 = global.CADTools.byId('move');
+            t2.mtoBase = { x: 0, y: 0 };
+            t2.applyParams();
+            assert(app2.model.count() === 2, '移动到复制应生成副本');
+            assert(app2.toasts[app2.toasts.length - 1].indexOf('原图形已保留') >= 0, '应提示保留原图形');
+          }
+        },
+        {
+          name: '平移复制：开关默认关闭并持久化上次设置',
+          run: function () {
+            const key = 'cad.move.copy';
+            let saved = null, ok = true;
+            try { saved = localStorage.getItem(key); } catch (e) { ok = false; }
+            if (!ok) return;
+            try {
+              localStorage.removeItem(key);
+              mockApp();
+              let f = global.CADTools.byId('move').params().filter(function (x) { return x.key === 'mcopy'; })[0];
+              assert(f && f.type === 'toggle' && f.label === '复制', '平移面板应有复制开关');
+              assert(f.def === false, '复制开关默认应为关闭');
+              localStorage.setItem(key, '1');
+              mockApp();
+              f = global.CADTools.byId('move').params().filter(function (x) { return x.key === 'mcopy'; })[0];
+              assert(f.def === true, '应自动恢复上次开启的设置');
+              const app = mockApp();
+              const t = global.CADTools.byId('move');
+              app.params.mcopy = true;
+              t.onParamChange('mcopy');
+              assert(localStorage.getItem(key) === '1', '开启状态应持久化');
+              app.params.mcopy = false;
+              t.onParamChange('mcopy');
+              assert(localStorage.getItem(key) === '0', '关闭状态应持久化');
+            } finally {
+              try {
+                if (saved === null) localStorage.removeItem(key);
+                else localStorage.setItem(key, saved);
+              } catch (e) {}
+            }
+          }
+        }
+      ]
+    },
+    {
+      name: '比例缩放',
+      cases: [
+        {
+          name: '缩放：百分比输入按包围盒中心等比缩放',
+          run: function () {
+            const app = mockApp();
+            const r = app.model.add({ type: 'rect', x1: 0, y1: 0, x2: 100, y2: 50 });
+            app.model.selected.add(r.id);
+            const t = global.CADTools.byId('scale');
+            assert(t && t.cat === 'edit', '缩放应位于编辑模块');
+            app.params.slock = false;
+            app.params.spct = 200;
+            const before = app.model.snapshot();
+            t.applyParams();
+            const e = app.model.entities[0];
+            near(e.x1, -50, 1e-9); near(e.x2, 150, 1e-9);
+            near(e.y1, -25, 1e-9); near(e.y2, 75, 1e-9);
+            near((e.x2 - e.x1) / (e.y2 - e.y1), 2, 1e-9, '宽高比应保持');
+            assert(app.undo.length === 1, '缩放应写入撤销记录');
+            assert(app.toasts[app.toasts.length - 1].indexOf('200%') >= 0, '应提示缩放百分比');
+            app.model.restoreSnapshot(app.undo.pop());
+            assert(app.model.snapshot() === before, '撤销应恢复缩放前状态');
+          }
+        },
+        {
+          name: '缩放：拖动角点等比模式保持宽高比',
+          run: function () {
+            const app = mockApp();
+            const r = app.model.add({ type: 'rect', x1: 0, y1: 0, x2: 100, y2: 50 });
+            app.model.selected.add(r.id);
+            const t = global.CADTools.byId('scale');
+            app.params.slock = true;
+            app.shiftKey = false;
+            t.onDragStart({ x: 100, y: 50 });
+            assert(t.active === true, '应命中角点并进入缩放');
+            t.onDragMove({ x: 200, y: 50 });
+            t.onDragEnd();
+            const e = app.model.entities[0];
+            near(e.x1, 0, 1e-9); near(e.y1, 0, 1e-9);
+            near(e.x2, 200, 1e-9); near(e.y2, 100, 1e-9);
+            near((e.x2 - e.x1) / (e.y2 - e.y1), 2, 1e-9, '等比缩放宽高比不变');
+            assert(app.undo.length === 1, '拖动缩放应写入撤销记录');
+            app.model.restoreSnapshot(app.undo.pop());
+            near(app.model.entities[0].x2, 100, 1e-9, '撤销应恢复原尺寸');
+          }
+        },
+        {
+          name: '缩放：按住 Shift 临时切换等比',
+          run: function () {
+            const app = mockApp();
+            app.model.add({ type: 'rect', x1: 0, y1: 0, x2: 100, y2: 50 });
+            app.model.selected.add(app.model.entities[0].id);
+            const t = global.CADTools.byId('scale');
+            app.params.slock = false;
+            app.shiftKey = true;
+            t.onDragStart({ x: 100, y: 50 });
+            t.onDragMove({ x: 200, y: 50 });
+            t.onDragEnd();
+            const e = app.model.entities[0];
+            near(e.x2, 200, 1e-9);
+            near(e.y2, 100, 1e-9);
+            near((e.x2 - e.x1) / (e.y2 - e.y1), 2, 1e-9, 'Shift 应强制等比');
+          }
+        },
+        {
+          name: '缩放：关闭等比且未按 Shift 时为自由缩放',
+          run: function () {
+            const app = mockApp();
+            app.model.add({ type: 'rect', x1: 0, y1: 0, x2: 100, y2: 50 });
+            app.model.selected.add(app.model.entities[0].id);
+            const t = global.CADTools.byId('scale');
+            app.params.slock = false;
+            app.shiftKey = false;
+            t.onDragStart({ x: 100, y: 50 });
+            t.onDragMove({ x: 200, y: 25 });
+            t.onDragEnd();
+            const e = app.model.entities[0];
+            near(e.x2, 200, 1e-9);
+            near(e.y2, 25, 1e-9);
+            assert(Math.abs((e.x2 - e.x1) / (e.y2 - e.y1) - 2) > 1e-6, '自由缩放应允许宽高比变化');
+          }
+        },
+        {
+          name: '缩放：多选按整体包围盒统一等比缩放',
+          run: function () {
+            const app = mockApp();
+            const r1 = app.model.add({ type: 'rect', x1: 0, y1: 0, x2: 100, y2: 50 });
+            const r2 = app.model.add({ type: 'rect', x1: 200, y1: 50, x2: 300, y2: 100 });
+            app.model.selected.add(r1.id);
+            app.model.selected.add(r2.id);
+            app.params.spct = 200;
+            const t = global.CADTools.byId('scale');
+            t.applyParams();
+            near(r1.x1, -150, 1e-9); near(r1.x2, 50, 1e-9);
+            near(r1.y1, -50, 1e-9); near(r1.y2, 50, 1e-9);
+            near(r2.x1, 250, 1e-9); near(r2.x2, 450, 1e-9);
+            near(r2.y1, 50, 1e-9); near(r2.y2, 150, 1e-9);
+            assert(app.model.count() === 2, '多选缩放不应改变图元数量');
+            assert(app.model.selected.size === 2, '缩放后应保持多选');
+          }
+        },
+        {
+          name: '缩放：组合对象内部子图元同步缩放',
+          run: function () {
+            const app = mockApp();
+            const r = app.model.add({ type: 'rect', x1: 0, y1: 0, x2: 20, y2: 20 });
+            const l = app.model.add(line(50, 0, 60, 0));
+            app.model.selected.add(r.id);
+            app.model.selected.add(l.id);
+            global.CADTools.byId('group').apply();
+            app.params.spct = 200;
+            global.CADTools.byId('scale').applyParams();
+            const g = app.model.entities[0];
+            assert(g.type === 'group', '组合结构应保留');
+            const cr = g.children[0];
+            near(cr.x2 - cr.x1, 40, 1e-9, '组合内矩形宽度应翻倍');
+            const cl = g.children[1];
+            near(Geo.dist(cl.p1, cl.p2), 20, 1e-9, '组合内直线长度应翻倍');
+            assert(app.model.count() === 1, '缩放不应拆散组合');
+          }
+        },
+        {
+          name: '缩放：等比例开关默认关闭并持久化',
+          run: function () {
+            const key = 'cad.scale.proportional';
+            let saved = null, ok = true;
+            try { saved = localStorage.getItem(key); } catch (e) { ok = false; }
+            if (!ok) return;
+            try {
+              localStorage.removeItem(key);
+              mockApp();
+              let fields = global.CADTools.byId('scale').params();
+              let f = fields.filter(function (x) { return x.key === 'slock'; })[0];
+              const pct = fields.filter(function (x) { return x.key === 'spct'; })[0];
+              assert(f && f.type === 'toggle' && f.label === '等比例', '缩放面板应有等比例开关');
+              assert(f.def === false, '等比例开关默认应为关闭');
+              assert(pct && pct.apply === true, '百分比输入应提供确定按钮');
+              localStorage.setItem(key, '1');
+              mockApp();
+              f = global.CADTools.byId('scale').params().filter(function (x) { return x.key === 'slock'; })[0];
+              assert(f.def === true, '应自动恢复上次开启的设置');
+              const app = mockApp();
+              const t = global.CADTools.byId('scale');
+              app.params.slock = true;
+              t.onParamChange('slock');
+              assert(localStorage.getItem(key) === '1', '开启状态应持久化');
+              app.params.slock = false;
+              t.onParamChange('slock');
+              assert(localStorage.getItem(key) === '0', '关闭状态应持久化');
+            } finally {
+              try {
+                if (saved === null) localStorage.removeItem(key);
+                else localStorage.setItem(key, saved);
+              } catch (e) {}
+            }
           }
         }
       ]

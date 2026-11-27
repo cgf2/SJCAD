@@ -550,6 +550,7 @@ select.prop-input { text-align: left; padding: 0 4px; }
 }
 .tool-chip.active .ic, .tool-chip.active .nm { color: var(--accent); }
 .tool-chip:active { transform: scale(.96); }
+.tool-chip:disabled { opacity: .45; }
 
 /* ============ 弹层 ============ */
 .modal {

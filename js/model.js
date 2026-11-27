@@ -17,15 +17,68 @@
     if (!ent.id) ent.id = 'e' + (this._seq++);
     ent.id = String(ent.id);
     if (this.findById(ent.id)) ent.id = 'e' + (this._seq++);
+    this._assignChildIds(ent);
     this.entities.push(ent);
     return ent;
   };
 
-  Doc.prototype.findById = function (id) {
-    for (let i = 0; i < this.entities.length; i++) {
-      if (this.entities[i].id === id) return this.entities[i];
+  /** 为组合对象的子图元补齐唯一 id（镜像 / 阵列副本的子图元默认无 id） */
+  Doc.prototype._assignChildIds = function (ent) {
+    if (!ent || ent.type !== 'group' || !Array.isArray(ent.children)) return;
+    const seen = new Set();
+    const self = this;
+    this.allEntities().forEach(function (e) { seen.add(e.id); });
+    (function walk(g) {
+      (g.children || []).forEach(function (c) {
+        c.id = c.id == null ? '' : String(c.id);
+        if (!c.id || seen.has(c.id)) c.id = 'e' + (self._seq++);
+        seen.add(c.id);
+        if (c.type === 'group') walk(c);
+      });
+    })(ent);
+  };
+
+  function findIn(list, id) {
+    for (let i = 0; i < list.length; i++) {
+      const e = list[i];
+      if (e.id === id) return e;
+      if (e.type === 'group' && e.children) {
+        const hit = findIn(e.children, id);
+        if (hit) return hit;
+      }
     }
     return null;
+  }
+
+  Doc.prototype.findById = function (id) {
+    return findIn(this.entities, String(id));
+  };
+
+  /** 展平后的全部图元（含组合对象内部的子图元），用于捕捉与引用校验 */
+  Doc.prototype.allEntities = function () {
+    const out = [];
+    (function walk(list) {
+      list.forEach(function (e) {
+        out.push(e);
+        if (e.type === 'group' && e.children) walk(e.children);
+      });
+    })(this.entities);
+    return out;
+  };
+
+  /** 为一批图元递归补齐唯一 id（元素分解生成的新线段） */
+  Doc.prototype.ensureIds = function (list) {
+    const seen = new Set();
+    const self = this;
+    this.allEntities().forEach(function (e) { seen.add(e.id); });
+    (function walk(arr) {
+      (arr || []).forEach(function (e) {
+        e.id = e.id == null ? '' : String(e.id);
+        if (!e.id || seen.has(e.id)) e.id = 'e' + (self._seq++);
+        seen.add(e.id);
+        if (e.type === 'group' && e.children) walk(e.children);
+      });
+    })(list);
   };
 
   Doc.prototype.remove = function (id) {
@@ -88,7 +141,7 @@
   /** 删除图元后清理失效的标注与约束 */
   Doc.prototype.pruneRefs = function () {
     const ids = new Set();
-    this.entities.forEach(function (e) { ids.add(e.id); });
+    this.allEntities().forEach(function (e) { ids.add(e.id); });
     const beforeD = this.dims.length, beforeC = this.constraints.length;
     this.dims = this.dims.filter(function (d) {
       if (d.ids && d.ids.length) {
@@ -124,16 +177,26 @@
   };
 
   /** 框选：crossing=true 为交叉选择 */
-  Doc.prototype.entitiesInRect = function (rect, crossing) {
-    return this.entities.filter(function (e) {
-      const pts = Geo.entityPolyline(e, 32);
-      if (!crossing) return pts.every(function (p) { return Geo.pointInRect(p, rect); });
-      for (let i = 0; i < pts.length; i++) {
-        if (Geo.pointInRect(pts[i], rect)) return true;
-        if (i < pts.length - 1 && Geo.segmentIntersectsRect(pts[i], pts[i + 1], rect)) return true;
+  function entInRect(e, rect, crossing) {
+    if (e.type === 'group') {
+      const kids = e.children || [];
+      if (!kids.length) return false;
+      if (crossing) {
+        return kids.some(function (k) { return entInRect(k, rect, true); });
       }
-      return false;
-    });
+      return kids.every(function (k) { return entInRect(k, rect, false); });
+    }
+    const pts = Geo.entityPolyline(e, 32);
+    if (!crossing) return pts.every(function (p) { return Geo.pointInRect(p, rect); });
+    for (let i = 0; i < pts.length; i++) {
+      if (Geo.pointInRect(pts[i], rect)) return true;
+      if (i < pts.length - 1 && Geo.segmentIntersectsRect(pts[i], pts[i + 1], rect)) return true;
+    }
+    return false;
+  }
+
+  Doc.prototype.entitiesInRect = function (rect, crossing) {
+    return this.entities.filter(function (e) { return entInRect(e, rect, crossing); });
   };
 
   /** 关联选择：从 start 出发，识别端点相连的连续图元 */
@@ -168,10 +231,13 @@
 
   function maxSeq(list) {
     let n = 0;
-    for (let i = 0; i < list.length; i++) {
-      const m = /^[a-z](\d+)$/.exec(String(list[i].id || ''));
-      if (m) n = Math.max(n, Number(m[1]));
-    }
+    (function walk(arr) {
+      arr.forEach(function (e) {
+        const m = /^[a-z](\d+)$/.exec(String(e.id || ''));
+        if (m) n = Math.max(n, Number(m[1]));
+        if (e.type === 'group' && e.children) walk(e.children);
+      });
+    })(list);
     return n + 1;
   }
 

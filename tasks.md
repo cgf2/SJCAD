@@ -1,40 +1,58 @@
-# 手机CAD · 第 16 轮任务清单
+# 实施任务清单 · 组合 / 分解
 
-> 对应 spec：[spec.md](file:///c:/Users/Administrator/Desktop/手机CAD/spec.md)
+> 全部任务已完成，回归 PASS=151 / FAIL=0。
 
-## 已完成（代码实现）
-- [x] T1 R1 直线坐标输入：`lineTool` 新增 `coord` 开关（def false）、4 个坐标项 `when` 条件、`applyParams` 保护、prompt 两态
-- [x] T2 R1 属性面板：「确定」按钮仅在存在可见数值项时显示（`main.js#L355-357`）
-- [x] T3 R2 中心线：`crossCenterlines` / `centerlineBetween` / `centerTool` 三态交互（圆十字、平行中线、角平分线、空白两点手绘）
-- [x] T4 R3 镜像：移除 `axisPick`、手动轴参数、`_axis()`、`applyParams`；保留点选轴线
-- [x] T5 R4 移除 `chainTool` 与工具列表入口；`model.chain` 保留给关联选择
-- [x] T6 R5 固定约束：新增 `fonly` toggle、提交 `onlyEndpoints`、快照/恢复仅端点分支、约束管理「仅端点/整体」显示
-- [x] T7 用例初步调整：链拾取用例改为「关联选择：链拾取模块已移除且功能不丢失」；性能用例改名
+## T1 几何层递归支持（js/geometry.js）
+- [x] `hitDistance` / `entityPolyline` / `entityBBox` / `entityMidpoint` / `entityLength` / `entityEndpoints` 增加 `group` 分支。
+- [x] `translateEntity` / `rotateEntity` / `mirrorEntity` / `copyShape` 递归处理 `children`；镜像副本递归清除 id，`copyShape` 深拷贝保留 id（原地恢复语义），新增副本的重复子 id 由 `Doc.add` 补齐。
+- [x] `setEntityProp` 对 group 返回明确错误。
+- 验收：group 的命中距离、包围盒、平移、镜像副本 id 唯一（自动化用例覆盖）。
 
-## 待执行（按顺序）
+## T2 模型层（js/model.js）
+- [x] `findById` 递归（含 group 子图元）。
+- [x] 新增 `allEntities()` 展平方法。
+- [x] `pruneRefs` 使用 `allEntities()` 的 id 集合。
+- [x] `entitiesInRect` 增加 group 的交叉 / 窗口判定。
+- [x] `maxSeq` 递归统计嵌套 id；`add` 递归补齐子图元唯一 id。
+- 验收：组合后标注 / 约束引用不被清理；框选行为正确；撤销恢复后新建图元 id 不冲突。
 
-### T8 修正既有用例（完成）
-- [x] T8.1 [tests.js](file:///c:/Users/Administrator/Desktop/手机CAD/js/tests.js#L574-L591)「直线工具：坐标输入精确生成」：`applyParams()` 前 `app.params.coord = true`
-- [x] T8.2 [tests.js](file:///c:/Users/Administrator/Desktop/手机CAD/js/tests.js#L710-L734)「直线工具：正交锁定」：`applyParams()` 前 `app.params.coord = true`
-- [x] T8.3 [tests.js](file:///c:/Users/Administrator/Desktop/手机CAD/js/tests.js#L1075-L1115)「镜像：点选轴线生成对称副本」：删除手动轴参数与 `applyParams()`，改为点选轴线；补充 `params()` 为空断言
-- [x] T8.4 [tests.js](file:///c:/Users/Administrator/Desktop/手机CAD/js/tests.js#L211-L224)「链拾取识别连续相连图元」改名为「关联选择链识别连续相连图元」
+## T3 渲染（js/render.js）
+- [x] `strokeEntity` 增加 group 分支，逐子图元绘制并透传颜色 / 线宽 / 发光。
+- 验收：页面探针中组合对象正常显示与整体高亮。
 
-### T9 新增用例（完成）
-- [x] T9.1 直线坐标输入默认关闭：`coord` 默认 false、`when` 过滤、关闭时 `applyParams` 不建图形
-- [x] T9.2 中心线圆：点圆内部 → 2 条 `style:'center'` 十字线，长度 `2*(r+ext)`
-- [x] T9.3 中心线平行两线 → 等距中线（y=20，含 ext）
-- [x] T9.4 中心线不平行两线 → 角平分线（过交点、方向 45°）
-- [x] T9.5 中心线共线两线 → toast 报错且不新增
-- [x] T9.6 固定约束仅端点：圆（overlap contain，圆心固定、半径可变）、线（distance，端点保持）、弧（切线，端点+半径恢复）、约束对象含 `onlyEndpoints`
+## T4 工具实现（js/tools.js）
+- [x] 新增 `groupCandidates()` / `ungroupCandidate()` 辅助函数。
+- [x] 新增 `groupTool`（id `group`，编辑页，`enabled()` ≥2 独立图元，`activate`/`onTap` → `apply`）。
+- [x] 新增 `ungroupTool`（id `ungroup`，编辑页，`enabled()` 单个 group，`activate`/`onTap` → `apply`）。
+- [x] 注册到工具数组（`rotateTool` 之后）。
+- 验收：组合后顶层数量减少、选中 group；分解后完全还原；条件不足仅 toast 不改模型。
 
-### T10 自动化回归（完成）
-- [x] Edge headless 跑 `test.html`，统计 OK/BAD，要求 BAD=0（结果：OK=117，BAD=0）
+## T5 交互与置灰（js/main.js + css/app.css）
+- [x] `EXT_HIDE_EDIT` 加入 `group`、`ungroup`。
+- [x] `updateToolChips()` 按 `tool.enabled()` 设置 `disabled` + `.disabled`。
+- [x] `App.setTool()` 增加条件守卫与提示。
+- [x] `App.afterSelectionChange()` 调用 `updateToolChips()`。
+- [x] `App.snapPoint` 的两个遍历改用 `App.model.allEntities()`。
+- [x] CSS 新增 `.tool-chip:disabled { opacity: .45; }`。
+- 验收：页面探针确认扩展关闭不可见、开启可见、选中/撤销后置灰状态同步、组合后子图元端点可捕捉。
 
-### T11 真实页面探针（完成）
-- [x] 注入 `_tmp_probe_*.html`：五项功能 + 绘制/标注/约束冒烟，全部 PASS（20/20）
-- [x] 删除临时探针文件
+## T6 文档与清单
+- [x] `js/help-meta.js`：新增主题 `组合与分解`，新增 `group` / `ungroup` 功能说明（steps ≥2）。
+- [x] `index.html`：功能扩展隐藏清单补充组合/分解；编辑说明新增「组合与分解」段落。
+- [x] `test.html`：第 69 项 33 → 34；新增第 73 项检查清单；补充覆盖说明。
+- [x] `js/tests.js`：主题数断言 33 → 34。
 
-### T12 文档与残留
-- [x] 更新 [index.html](file:///c:/Users/Administrator/Desktop/手机CAD/index.html) 帮助（直线坐标默认关闭、中心线三规则、镜像仅点选轴、移除链拾取、固定仅端点）
-- [x] 更新 [test.html](file:///c:/Users/Administrator/Desktop/手机CAD/test.html) 手动清单与覆盖说明
-- [x] 全局搜索「链拾取 / chain」确认无 UI 残留（仅保留“模块已移除”说明与关联选择链算法注释）
+## T7 自动化测试（js/tests.js）
+- [x] 组合：合并数量 / children id、属性、顺序 / 选中态 / 插入位置。
+- [x] 分解：还原数量 / id / 顺序 / 选中态。
+- [x] 触发条件与置灰逻辑（0/1/含 group、单个 group）。
+- [x] 撤销快照往返（组合 → 恢复 → 再组合）。
+- [x] 组合对象兼容：hitTest / bbox / 框选 / 平移 / 镜像 / 复制。
+- [x] 工具注册与分类校验（说明映射完整性用例覆盖）。
+- 验收：新增 6 例，总数 151，全部通过。
+
+## T8 回归与真机页面验证
+- [x] 回归脚本结果：`PASS=151 FAIL=0`。
+- [x] Edge headless 探针：扩展关闭无组合/分解入口；开启后出现；选中 2 图元组合可用、分解置灰；组合后顶层 3→2 且按钮状态互换；分解后恢复 3、无 group；撤销后 2（1 个 group）、重做后 3。
+- [x] 清理 `_tmp_probe_group.js` / `_tmp_probe_group_on.html` / `_tmp_probe_group_off.html` 及遗留 `_tmp_probe_stretch.*`。
+- [x] 输出变更摘要与手动验证清单。

@@ -14,7 +14,7 @@
   /* 功能扩展开关：关闭时隐藏不常用绘图工具与全部约束功能 */
   const EXT_KEY = 'cad.ext.enabled';
   const EXT_HIDE_DRAW = { rect: true, poly: true, arc: true, offset: true, contour: true, spline: true };
-  const EXT_HIDE_EDIT = { splineEdit: true };
+  const EXT_HIDE_EDIT = { group: true, ungroup: true, fill: true, scale: true, explode: true };
   let extEnabled = false;
   let currentTab = 'edit';
   try { extEnabled = localStorage.getItem(EXT_KEY) === '1'; } catch (e) { extEnabled = false; }
@@ -29,6 +29,7 @@
     redoStack: [],
     overlay: null,
     snapInfo: null,
+    shiftKey: false,
     dimDrag: null,
     dimHoverId: null,
     W: 0,
@@ -77,7 +78,7 @@
       const d = Geo.dist(p, q) / (prio || 1);
       if (d < bestD) { bestD = d; best = { p: q, type: type }; }
     }
-    App.model.entities.forEach(function (e) {
+    App.model.allEntities().forEach(function (e) {
       if (e.type === 'line') {
         consider(e.p1, '端点');
         consider(e.p2, '端点');
@@ -109,7 +110,7 @@
     });
     // 交点捕捉：只对光标附近的图元两两求交，兼顾精度与性能
     const near = [];
-    App.model.entities.forEach(function (e) {
+    App.model.allEntities().forEach(function (e) {
       if (e.type === 'point') return;
       if (Geo.hitDistance(e, p) <= tol) near.push(e);
     });
@@ -490,7 +491,7 @@
   }
 
   function propsHtml(ent) {
-    const names = { line: '直线', circle: '圆', arc: '圆弧', point: '点', rect: '矩形', poly: '多边形', spline: '样条线' };
+    const names = { line: '直线', circle: '圆', arc: '圆弧', point: '点', rect: '矩形', poly: '多边形', spline: '样条线', group: '组合' };
     let html = '<div class="row"><span class="k">类型</span><span class="v">' + (names[ent.type] || ent.type) + '</span></div>';
     if (ent.type === 'line') {
       html += propInput('起点 X', 'x1', ent.p1.x) + propInput('起点 Y', 'y1', ent.p1.y);
@@ -694,7 +695,7 @@
   };
 
   App.entityInfo = function (ent, withId) {
-    const names = { line: '直线', circle: '圆', arc: '圆弧', point: '点', rect: '矩形', poly: '多边形', spline: '样条线' };
+    const names = { line: '直线', circle: '圆', arc: '圆弧', point: '点', rect: '矩形', poly: '多边形', spline: '样条线', group: '组合' };
     function row(k, v) {
       return '<div class="row"><span class="k">' + k + '</span><span class="v">' + v + '</span></div>';
     }
@@ -737,6 +738,10 @@
   App.setTool = function (id, silent) {
     const next = Tools.byId(id);
     if (!next) return;
+    if (typeof next.enabled === 'function' && !next.enabled()) {
+      App.toast('未满足「' + next.name + '」的触发条件：' + (typeof next.prompt === 'function' ? next.prompt() : ''));
+      return;
+    }
     // 切换工具时不自动展开操作选项，需由用户主动点击展开
     App.paramsOpen = false;
     App.dimHoverId = null;
@@ -769,6 +774,10 @@
     const chips = document.querySelectorAll('.tool-chip');
     for (let i = 0; i < chips.length; i++) {
       chips[i].classList.toggle('active', App.tool && chips[i].dataset.id === App.tool.id);
+      const t = Tools.byId(chips[i].dataset.id);
+      const dis = !!(t && typeof t.enabled === 'function' && !t.enabled());
+      chips[i].disabled = dis;
+      chips[i].classList.toggle('disabled', dis);
     }
     const vbtns = document.querySelectorAll('.vbtn');
     for (let i = 0; i < vbtns.length; i++) {
@@ -778,6 +787,7 @@
 
   /* ---------------- 选中态 / 视野 ---------------- */
   App.afterSelectionChange = function () {
+    updateToolChips();
     updateSelBar();
     App.refresh();
   };
@@ -1734,6 +1744,21 @@
       modal.classList.add('hidden');
     }
   }, true);
+  function trackShift(e) {
+    const v = !!e.shiftKey;
+    if (App.shiftKey === v) return;
+    App.shiftKey = v;
+    if (App.tool && App.tool.id === 'scale') {
+      App.updatePrompt();
+      App.refresh();
+    }
+  }
+  window.addEventListener('keydown', trackShift);
+  window.addEventListener('keyup', trackShift);
+  window.addEventListener('blur', function () {
+    App.shiftKey = false;
+    if (App.tool && App.tool.id === 'scale') App.refresh();
+  });
   $('btnSelDelete').addEventListener('click', function () {
     if (!App.model.selected.size) return;
     App.begin();

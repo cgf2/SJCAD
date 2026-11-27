@@ -1,112 +1,153 @@
-# 手机CAD · 第 16 轮：几何约束与辅助线优化（Spec）
+# 编辑模块新增「组合 / 分解」功能 · 技术规格
 
-## 1. 目标与范围
+## 1. 目标
+在现有编辑（`cat: 'edit'`）工具集中新增两个命令式工具：
+- **组合**：把 ≥2 个选中的独立图元合并为一个整体对象（`type: 'group'`），完整保留每个子图元的几何、样式与 id，并保持原有绘制顺序（层级）。
+- **分解**：把选中的整体对象拆回独立图元，子图元回到顶层图元列表的原有位置，恢复各自独立编辑属性。
 
-按用户第 16 轮要求，对五项功能做调整，并保持既有交互逻辑一致、无兼容性问题：
+同时满足：
+- 两个工具**仅在「功能扩展」开关开启时可见**（复用现有 `EXT_HIDE_EDIT` 机制）。
+- 未满足触发条件时按钮**置灰不可点**；组合需 ≥2 个独立图元，分解需恰好选中 1 个组合对象。
+- 与 `App.begin/end` 快照机制完全兼容，可正常撤销 / 重做。
+- 不修改任何现有编辑工具的核心逻辑，交互与提示风格保持一致。
 
-| 编号 | 需求 | 验收要点 |
-|---|---|---|
-| R1 | 直线绘制：手动坐标输入默认关闭，需勾选启用 | 属性面板出现「坐标输入」开关，默认关闭；关闭时 x1/y1/x2/y2 不显示、不显示「确定」；勾选后恢复原有精确输入 |
-| R2 | 中心线：按对象自动生成 | 点圆/圆弧 → 过圆心水平+垂直十字中心线；两条平行线 → 等距中线；两条不平行线 → 角平分线；保留空白两点手绘兼容 |
-| R3 | 镜像：移除手动输入镜像轴入口 | 镜像工具 `params()` 为空、无「确定」；仅保留“先选图形、再点按一条直线作为镜像轴” |
-| R4 | 链拾取：完全移除该功能模块 | 工具列表无 `chain`；关联选择仍可用（复用 `model.chain`） |
-| R5 | 固定约束：新增「仅固定端点」选项 | 约束工具面板出现「仅固定端点」开关（默认关）；开启时只锚定端点/圆心，不锁整体形状与方向；约束管理显示「仅端点 / 整体」 |
+## 2. 数据模型
+组合对象为**嵌套容器**，作为普通图元参与 `model.entities`：
 
-所有新增选项必须在对应功能属性面板清晰展示；调整后完成全功能回归测试。
+```js
+{ id: 'e7', type: 'group', children: [ /* 原图元对象，保留各自 id 与全部属性 */ ] }
+```
 
-## 2. 当前代码状态（已实现）
+- 子图元从 `model.entities` 顶层移入 `children`，**id 不变**，顺序 = 原文档顺序。
+- 组合对象插入到「第一个被选中图元」在文档中的位置，保证绘制层级不跳变。
+- 分解时按 `children` 原顺序插回组合对象所在下标处。
+- 组合对象不携带任何几何字段，几何一律由其子图元决定。
 
-### R1 直线坐标输入
-- [js/tools.js](file:///c:/Users/Administrator/Desktop/手机CAD/js/tools.js) `lineTool.params()`：在「捕捉」组后新增
-  `{ key:'coord', type:'toggle', label:'坐标输入', def:false, group:'坐标输入' }`；
-  `x1/y1/x2/y2` 均带 `when: p => p.coord === true`。
-- `lineTool.applyParams()` 首行保护：`if (App.params.coord !== true) { App.toast('请先勾选“坐标输入”再输入坐标'); return; }`。
-- `lineTool.prompt` 起始文案按 `App.params.coord` 两态。
-- [js/main.js](file:///c:/Users/Administrator/Desktop/手机CAD/js/main.js#L355-L357)：「确定」按钮仅在存在可见数值项时渲染：
-  `const hasNumber = fields.some(fd => !fd.type || fd.type === 'number'); if (hasNumber && typeof App.tool.applyParams === 'function') ...`
+## 3. 精确改动清单
 
-### R2 中心线
-- [js/tools.js](file:///c:/Users/Administrator/Desktop/手机CAD/js/tools.js#L239-L400)：
-  - `centerExt()` 读取 `App.params.cext`（默认 6，非法归 0）。
-  - `centerLine(p1,p2)` 生成 `{type:'line', p1, p2, style:'center'}`。
-  - `crossCenterlines(e, ext)`：`h = e.r + ext`，返回过 `e.c` 的水平线与垂直线。
-  - `centerlineBetween(a,b,ext)`：
-    - 平行（`|sin| <= 0.01`）：法向有符号距离 `dSigned`；`|dSigned| < 1e-6` 返回 `{error:'两条直线重合，无法生成中心线'}`；否则取 `mid = a.p1 + n*dSigned/2`，沿 `ua` 投影四端点得 `[lo,hi]`，两端各加 `ext`。
-    - 不平行：`Geo.lineIntersectInfinite` 求交点；把 `ub` 翻向使 `dot(ua,ub) >= 0`；`v = normalize(ua+ub)`；`L = max(端点至交点距离) + ext`，生成以交点为中点的角平分线。
-  - `centerTool`（id `center`，cat `draw`，dragType `preview`）：
-    - `onTap`：已有 `points` → `_finishManual`；`App.pick` 空 → 有 `picks` 则取消，否则 `_circleAt` 命中则生成十字，未命中则 `points=[p]` 两点手绘；命中 circle/arc → `_makeCross`；命中非 line → toast；命中 line → 首次记录 `picks`，同 id 提示换线，不同 id 调 `centerlineBetween` 成功后加线并 reset。
-    - `_circleAt(p)`：遍历 circle，`Geo.dist(p,e.c) <= e.r + App.worldTol(10)`，取半径最小者（支持点圆内部）。
-    - `_makeCross(e)`：添加两条中心线，toast「已生成过圆心的水平 / 垂直中心线」。
-    - `onRender`：ghost 已选直线与 hover 的另一条直线；手绘态画点划线预览。
+### 3.1 `js/geometry.js`（新增 group 递归支持）
+| 函数 | 改动 |
+|---|---|
+| `hitDistance` | `type === 'group'` → 子图元 `hitDistance` 取最小值 |
+| `entityPolyline` | group → 依次拼接各子图元 polyline（供 bbox 兜底） |
+| `entityBBox` | group → 各子图元 `entityBBox` 并集 |
+| `entityMidpoint` | group → 包围盒中心 |
+| `entityLength` | group → 子图元长度累加 |
+| `entityEndpoints` | group → `[]`（不参与关联链 / 首尾链接） |
+| `translateEntity` | group → 对 `children` 递归 |
+| `rotateEntity` | group → 对 `children` 递归 |
+| `mirrorEntity` | group → 返回新 group，`children` 递归镜像，且**递归清除 id**（副本不得复用原 id） |
+| `copyShape` | group → 深拷贝 `children`（保留 id，用于旋转 / 拖动 / 约束求解的原地恢复；新增副本的重复 id 由 `Doc.add` 递归补齐） |
+| `setEntityProp` | group → `{ ok:false, error:'组合对象不支持直接修改属性，请先分解' }` |
+| 新增 `cloneEntity` | 仅内部使用：JSON 深拷贝后递归删除 id，供镜像 / 阵列使用 |
 
-### R3 镜像
-- [js/tools.js](file:///c:/Users/Administrator/Desktop/手机CAD/js/tools.js#L2191-L2246)：删除 `axisPick`、`x1/y1/x2/y2` 参数、`_axis()`、`applyParams`；`onTap` 中 `if (sel.size && e.type === 'line') this._mirrorAbout(e.p1, e.p2);`；`onRender` 仅在已选且 hover 命中 line 时绘制镜像轴与副本虚影。
+导出：无需新增导出（`cloneEntity` 内部使用即可）。
 
-### R4 链拾取
-- [js/tools.js](file:///c:/Users/Administrator/Desktop/手机CAD/js/tools.js#L3470) 工具列表已删除 `chainTool`（现为 `... arrayTool, mirrorTool, rotateTool, ...`）。
-- `model.chain` 算法保留，供「关联选择」使用（非 UI 模块）。
+### 3.2 `js/model.js`
+| 方法 | 改动 |
+|---|---|
+| `findById` | 递归：先查顶层，再查每个 group 的 `children` |
+| `add` | 重复 id 检测改用（递归）`findById` |
+| 新增 `allEntities()` | 返回展平后的全部图元（顶层 + group 子孙），供捕捉 / 引用校验使用 |
+| `pruneRefs` | id 集合改用 `allEntities()`，**保证组合期间约束 / 标注引用不被误删** |
+| `entitiesInRect` | group 特殊分支：交叉选择 = 任一子图元命中；窗口选择 = 所有子图元完全在内 |
+| `maxSeq` | 递归统计 group 子图元 id，避免撤销恢复后新建 id 冲突 |
+| `snapshot / restoreSnapshot` | 不改（JSON 自然包含嵌套结构） |
+| `count / bbox / chain` | 不改（`count` 统计顶层对象，组合后计为 1；`chain` 不穿组） |
 
-### R5 固定约束仅固定端点
-- [js/tools.js](file:///c:/Users/Administrator/Desktop/手机CAD/js/tools.js#L2872)：`makeConstraintTool` 对 `fixed` 增加
-  `{ key:'fonly', type:'toggle', label:'仅固定端点', def:false, group:'固定' }`。
-- `fixedConstraintTool` 的 `prompt` / `pick` / `draft` 均读取 `App.params.fonly`，提交 `{ onlyEndpoints: true|false }`。
-- [js/constraints.js](file:///c:/Users/Administrator/Desktop/手机CAD/js/constraints.js#L1423-L1495)：
-  - `fixedAnchorPoints(e)`：`Geo.entityEndpoints` 有值则复制；circle 返回圆心；否则 `[]`。
-  - `fixedSnapshot`：`onlyEndpoints` 时存 `{onlyEndpoints:true, type, pts}`，否则整实体深拷贝。
-  - `pinArcEndpoints(e,p1,p2)`：保持半径，由弦中点+法向偏移反解圆心，取离原圆心近者；半径不足半弦长时退化为半圆。
-  - `restoreFixed`：完整模式 `Geo.copyShape`；仅端点模式 line 恢复 p1/p2、point 恢复 p、circle 恢复圆心（半径自由）、arc 调 `pinArcEndpoints`、rect/poly 平移使首角点回位（形状方向保持当前）。
-- 约束管理 `listHtml`：fixed 显示 `<span class="con-mode">仅端点|整体</span>`，空态与底部 hint 补充说明。
+### 3.3 `js/render.js`
+- `strokeEntity` 增加 group 分支：对 `children` 逐个 `strokeEntity(child, color, width, glow)` 后返回。
+- 选中组合对象时整体高亮其所有子图元（颜色 / 线宽 / 发光沿用入参），子图元自带 `style` / `fill` / `centerMark` 不受影响。
+- `pathEntity` 不变（group 不会走到该分支）。
 
-## 3. 待完成工作
+### 3.4 `js/tools.js`
+在 `rotateTool` 之后新增：
 
-### W1 自动化用例补齐/修正 [js/tests.js](file:///c:/Users/Administrator/Desktop/手机CAD/js/tests.js)
-1. 既有用例适配：
-   - 「直线工具：坐标输入精确生成」（约 574 行）与「直线工具：正交锁定」（约 710 行）在 `applyParams()` 前设置 `app.params.coord = true`。
-   - 「镜像：指定轴生成对称副本」（约 1075 行）删除 `params.x1...` 与 `applyParams()`：改为模型中加一条轴线，选中 3 个待镜像图元后 `onTap(轴线上一点)`；重复镜像应跳过的子场景同样改为点选轴。
-   - 「链拾取识别连续相连图元」（约 211 行）改名为「关联选择链识别连续相连图元」（算法保留）。
-2. 新增用例：
-   - `line`：`params()` 中 `coord` 默认 `false`；`coord !== true` 时 `applyParams()` 不建图形并 toast；`when` 在 `coord=false` 时过滤 x1/y1/x2/y2。
-   - `center`：
-     - 圆 → 2 条 `style:'center'` 线，分别过圆心水平/垂直，长度 `2*(r+ext)`（测试点圆内部命中）。
-     - 两条平行线（y=0 / y=40）→ 1 条中线 y=20，端点按投影 `[0,100]` 加 ext。
-     - 两条不平行线（x 轴与 x=50 竖线）→ 角平分线过交点 (50,0)，方向 45°。
-     - 两条重合线 → toast 报错且不新增图元。
-   - `mirror`：`params()` 返回空数组；`applyParams` 不存在。
-   - `fixed`：`onlyEndpoints` 行为
-     - 圆 + `overlap`（contain）约束：圆心保持、半径随约束改变（与完整固定对比）。
-     - 直线 + `distance` 约束：端点保持原位。
-     - 圆弧 + 切线约束：端点与半径恢复、圆心反解。
-     - 约束对象含 `onlyEndpoints: true`。
+```js
+function groupCandidates() {
+  const sel = App.model.selected;
+  const list = App.model.selectedEntities();
+  if (sel.size < 2 || list.length !== sel.size) return [];
+  for (let i = 0; i < list.length; i++) if (list[i].type === 'group') return [];
+  return list;
+}
+function ungroupCandidate() {
+  const list = App.model.selectedEntities();
+  return list.length === 1 && list[0].type === 'group' ? list[0] : null;
+}
+```
 
-### W2 全量回归
-- Edge headless 运行 `test.html`，统计 `stat ok` / `stat bad`，要求 BAD=0。
+- `groupTool`：`id:'group'`, `name:'组合'`, `cat:'edit'`, `icon:'▣'`, `dragType:'pan'`
+  - `enabled()` → `groupCandidates().length >= 2`
+  - `prompt()` → 满足时「已选 N 个独立图元，点按画布即可组合」；否则「请先选择 2 个及以上独立图元」
+  - `activate()` / `onTap()` → 调 `this.apply()`
+  - `apply()`：条件不满足 → `App.toast('请先选中 2 个及以上独立图元')` 并返回 false；否则
+    `App.begin()` → 按文档顺序取出选中图元 → 从顶层移除 → `App.model.add({type:'group', children: 有序子图元})` → 把 group 移到首个被选图元原下标 → `selected = {group.id}` → `App.end()` → `App.afterSelectionChange()` → `App.updatePrompt()` → toast `已组合：N 个图元合并为 1 个整体`
+- `ungroupTool`：`id:'ungroup'`, `name:'分解'`, `cat:'edit'`, `icon:'⧅'`, `dragType:'pan'`
+  - `enabled()` → `!!ungroupCandidate()`
+  - `apply()`：条件不满足 → toast `请先选中一个组合对象`；否则 `App.begin()` → 记录 group 下标 → `remove(group.id)` → 子图元按下标插回顶层 → `selected = 子图元 id 集合` → `App.end()` → `afterSelectionChange()` → toast `已分解：N 个图元恢复为独立对象`
+- 注册：工具数组 `..., moveTool, arrayTool, mirrorTool, rotateTool, groupTool, ungroupTool, ...`
 
-### W3 真实页面探针（五项 + 冒烟）
-- 复制 `index.html` 为 `_tmp_probe_*.html`，`</body>` 前注入脚本，验证：
-  1. 直线默认无坐标输入数值项、无「确定」；勾选后出现 4 个数值项与「确定」，可建线。
-  2. 中心线点圆生成 2 条十字线；平行两线生成中线；不平行两线生成角平分线。
-  3. 镜像工具无坐标参数与「确定」，点选轴线可完成镜像。
-  4. 工具列表无「链拾取」按钮；关联选择仍可选中相连链。
-  5. 固定约束面板有「仅固定端点」开关；开启后约束对象 `onlyEndpoints === true`，约束管理显示「仅端点」。
-- 冒烟：直线/圆/矩形/标注/约束各跑一遍无异常，`R.draw()` 正常。
-- 完成后删除临时探针文件。
+说明：两者为「即点即执行」命令（选中 → 点按钮立即生效），保留在当前工具上可继续点按画布重复执行，与删除 / 镜像等单击型工具一致。
 
-### W4 文档更新
-- [index.html](file:///c:/Users/Administrator/Desktop/手机CAD/index.html) 帮助：
-  - 直线：坐标输入默认关闭，需勾选；
-  - 中心线：三种对象自动生成规则 + 空白两点手绘；
-  - 镜像：仅点选直线作镜像轴；
-  - 删除链拾取说明；
-  - 固定约束：补充「仅固定端点」。
-- [test.html](file:///c:/Users/Administrator/Desktop/手机CAD/test.html) 手动清单：
-  - 删除/改写链拾取条目；
-  - 新增上述 5 项检查项，并同步自动化覆盖说明文字。
+### 3.5 `js/main.js`
+- `EXT_HIDE_EDIT` 增加：`{ group: true, ungroup: true }`。
+- `updateToolChips()`：对每个 chip 取 `Tools.byId(id)`，若 `typeof t.enabled === 'function' && !t.enabled()` → `chip.disabled = true` + `classList.add('disabled')`，否则清除。`active` 逻辑不变。
+- `App.setTool(id)`：在 `if (!next) return;` 之后增加条件守卫——工具存在 `enabled()` 且返回 false 时 `App.toast('未满足「' + next.name + '」的触发条件：…')` 并 `return`（不切换工具）。
+- `App.afterSelectionChange()`：先调用 `updateToolChips()`，再 `updateSelBar()` + `refresh()`，使按钮置灰状态随选择 / 撤销 / 框选实时同步。
+- 其它（undo/redo、ext 开关、渲染循环）不改。
 
-### W5 残留检查
-- 全局搜索「链拾取 / chain」确保 UI、帮助、手动清单无残留（`model.chain` 与关联选择相关命名允许保留）。
+### 3.6 `css/app.css`
+- `.tool-chip:disabled { opacity: .45; }`（保持布局尺寸不变，仅视觉置灰）。
 
-## 4. 验收标准
-- 自动化回归 OK 数 ≥ 115 且 BAD=0（新增 5+ 用例）。
-- 真实页面探针全部 PASS，页面控制台无异常。
-- 帮助与手动清单与实现一致，无「链拾取」残留入口。
-- 五项功能在关闭/开启、单选/多选、边界输入（重合、零长度）场景下结果符合预期。
+### 3.7 文档与清单
+- `js/help-meta.js`
+  - `CAD_HELP_META` 新增主题 `'组合与分解'`（summary / scenes / notes）。
+  - `CAD_FEATURE_HELP` 新增 `group`、`ungroup` 两项：`topic:'组合与分解'`，`steps` ≥ 2 步，`related` 引用有效主题。
+- `index.html`
+  - 「功能扩展」说明段落：隐藏清单补「编辑页的组合、分解」。
+  - 编辑功能说明区新增「组合与分解」段落：说明条件、即点即执行、撤销兼容、仅扩展开启可见。
+- `js/tests.js`
+  - 「功能徽标说明映射」用例中主题数 `33` → `34`。
+- `test.html`
+  - 第 69 项「33 个折叠说明卡片」→「34 个」。
+  - 新增第 73 项手动验证清单（显隐、置灰、组合/分解、撤销/重做、边界）。
+  - 底部覆盖说明补充组合 / 分解用例。
+
+## 4. 边界与兼容
+- 组合只接受**顶层独立图元**，不允许「组合里再组合」；选中项含 group 时按钮置灰。
+- 分解只接受**恰好 1 个** group；多选 / 选中普通图元时置灰。
+- 撤销 / 重做：snapshot 为 JSON，天然包含 `children`；`restoreSnapshot` 递归重算 `_seq`，防止后续新建 id 撞车。
+- 约束 / 标注：`pruneRefs` 使用递归 id 集合，组合不会清空引用；`findById` 递归保证标注仍能定位子图元。分解后约束按原逻辑恢复生效。
+- 捕捉：`App.snapPoint` 改为遍历展平后的图元列表（若未改，则组合后无法吸附子图元端点，属功能回退，必须一并处理）。
+  实现：`App.model.allEntities()` 替换 `App.model.entities` 的两个遍历（端点捕捉 + 交点捕捉）。
+- 命中 / 框选：命中组合返回 group；框选按子图元判定（见 3.2）。
+- 层叠：组合/分解不改变相对绘制顺序。
+- 原有工具：删除、平移、旋转、镜像、阵列通过 `Geo.*` 递归后可直接作用于组合对象；裁剪 / 过渡 / 拉伸不识别 group（与现状一致，不报错）。
+
+## 5. 测试与验证
+1. **自动化**（`js/tests.js` 新增 6 例，基线 145 → 151）：
+   - 组合：2/3 选中合并、数量、children id/属性/顺序、选中态、插入下标。
+   - 分解：还原数量、id、顺序、选中态、group 移除。
+   - 触发条件：0/1/含 group 时 `enabled()` 为 false；单个 group 时 ungroup 为 true；不满足时 `apply()` 不改模型且有 toast。
+   - 撤销快照往返：组合前 snapshot → 组合 → 恢复 → 原样；再组合 → undo stack 记录正确。
+   - 组合对象兼容：`hitTest` 命中 group、`entityBBox` 覆盖、`entitiesInRect` 交叉/窗口、`translateEntity`、`mirrorEntity`（新副本无重复 id）、`copyShape`。
+   - 工具注册与分类：group/ungroup 存在、`cat==='edit'`、具备 `enabled`。
+2. **回归**：
+   `powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Administrator\AppData\Local\Temp\run_cad_stretch_test.ps1"`
+   期望 `PASS=151 FAIL=0`。
+3. **真实页面探针**（Edge headless，`localStorage['cad.ext.enabled']='1'`）：
+   - 扩展关闭：编辑页无「组合 / 分解」chip；
+   - 扩展开启：chip 出现；
+   - 脚本选中 2 条线后 `CADApp.afterSelectionChange()` → 组合 chip 可用；`CADApp.setTool('group')` → 顶层图元 3→2，组合 chip 置灰、分解 chip 可用；
+   - `CADApp.setTool('ungroup')` → 顶层恢复 3；
+   - `CADApp.undo()` / `redo()` 后图元数与按钮置灰状态正确。
+4. **清理**：删除遗留 `_tmp_probe_stretch.html` / `_tmp_probe_stretch.js`，探针临时文件用完即删。
+
+## 6. 验收标准
+- 扩展关闭时两个入口完全不可见；开启后出现在编辑页。
+- 未达条件时按钮置灰且点击无副作用（仅提示）。
+- 组合后整体可被拾取 / 框选 / 平移 / 旋转 / 镜像，子图元属性与 id 完整保留。
+- 分解后与组合前完全一致（数量、id、几何、样式、顺序），且可独立编辑。
+- 组合 / 分解均可撤销与重做，撤销后按钮状态同步刷新。
+- 原有 145 项用例全部通过。

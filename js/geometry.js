@@ -232,6 +232,13 @@
 
   function entityPolyline(ent, segs) {
     segs = segs || 64;
+    if (ent.type === 'group') {
+      const out = [];
+      (ent.children || []).forEach(function (c) {
+        entityPolyline(c, segs).forEach(function (q) { out.push(q); });
+      });
+      return out;
+    }
     if (ent.type === 'line') return [cloneP(ent.p1), cloneP(ent.p2)];
     if (ent.type === 'point') return [cloneP(ent.p)];
     if (ent.type === 'spline') return splinePolyline(ent, Math.max(segs, 48));
@@ -255,6 +262,7 @@
   }
 
   function entityEndpoints(ent) {
+    if (ent.type === 'group') return [];
     if (ent.type === 'line') return [cloneP(ent.p1), cloneP(ent.p2)];
     if (ent.type === 'point') return [cloneP(ent.p)];
     if (ent.type === 'arc') return [arcStart(ent), arcEnd(ent)];
@@ -272,6 +280,9 @@
   }
 
   function entityLength(ent) {
+    if (ent.type === 'group') {
+      return (ent.children || []).reduce(function (sum, c) { return sum + entityLength(c); }, 0);
+    }
     if (ent.type === 'line') return dist(ent.p1, ent.p2);
     if (ent.type === 'circle') return TAU * ent.r;
     if (ent.type === 'arc') return arcSweep(ent) * ent.r;
@@ -282,6 +293,10 @@
   }
 
   function entityMidpoint(ent) {
+    if (ent.type === 'group') {
+      const b = entityBBox(ent);
+      return P((b.x1 + b.x2) / 2, (b.y1 + b.y2) / 2);
+    }
     if (ent.type === 'line') return lerp(ent.p1, ent.p2, 0.5);
     if (ent.type === 'point') return cloneP(ent.p);
     if (ent.type === 'circle') return polar(ent.c, ent.r, Math.PI / 4);
@@ -322,6 +337,14 @@
   }
 
   function hitDistance(ent, p) {
+    if (ent.type === 'group') {
+      let best = Infinity;
+      (ent.children || []).forEach(function (c) {
+        const d = hitDistance(c, p);
+        if (d < best) best = d;
+      });
+      return best;
+    }
     if (ent.type === 'line') return closestOnSeg(p, ent.p1, ent.p2).dist;
     if (ent.type === 'point') return dist(p, ent.p);
     if (ent.type === 'circle') return Math.abs(dist(p, ent.c) - ent.r);
@@ -337,6 +360,17 @@
   }
 
   function entityBBox(ent) {
+    if (ent.type === 'group') {
+      const kids = ent.children || [];
+      if (!kids.length) return { x1: 0, y1: 0, x2: 0, y2: 0 };
+      let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
+      kids.forEach(function (c) {
+        const b = entityBBox(c);
+        if (b.x1 < x1) x1 = b.x1; if (b.y1 < y1) y1 = b.y1;
+        if (b.x2 > x2) x2 = b.x2; if (b.y2 > y2) y2 = b.y2;
+      });
+      return { x1: x1, y1: y1, x2: x2, y2: y2 };
+    }
     if (ent.type === 'point') return { x1: ent.p.x, y1: ent.p.y, x2: ent.p.x, y2: ent.p.y };
     if (ent.type === 'line') {
       return {
@@ -365,6 +399,10 @@
   }
 
   function translateEntity(ent, dx, dy) {
+    if (ent.type === 'group') {
+      (ent.children || []).forEach(function (c) { translateEntity(c, dx, dy); });
+      return ent;
+    }
     if (ent.type === 'rect') {
       ent.x1 += dx; ent.x2 += dx; ent.y1 += dy; ent.y2 += dy;
       return ent;
@@ -393,6 +431,10 @@
   }
 
   function rotateEntity(ent, base, ang) {
+    if (ent.type === 'group') {
+      (ent.children || []).forEach(function (c) { rotateEntity(c, base, ang); });
+      return ent;
+    }
     if (ent.type === 'rect') {
       const pts = rectPoints(ent).map(function (q) { return rotatePoint(q, base, ang); });
       // 旋转 90° 的整数倍时仍是轴对齐矩形，其余角度转换为多边形
@@ -428,6 +470,14 @@
   }
 
   function copyShape(target, src) {
+    if (src.type === 'group') {
+      // 原地恢复语义：保留子图元 id；新增副本的重复 id 由 Doc.add 统一补齐
+      target.type = 'group';
+      target.children = (src.children || []).map(function (c) { return JSON.parse(JSON.stringify(c)); });
+      delete target.p1; delete target.p2; delete target.p; delete target.c;
+      delete target.pts; delete target.x1; delete target.y1; delete target.x2; delete target.y2;
+      return target;
+    }
     target.type = src.type;
     if (src.type === 'rect') {
       ['x1', 'y1', 'x2', 'y2'].forEach(function (k) { target[k] = src[k]; });
@@ -663,9 +713,22 @@
     return { ent1: ent1, ent2: ent2, arc: arc, tangent1: best.t1, tangent2: best.t2 };
   }
 
+  /** 递归删除图元及其 group 子孙的 id */
+  function stripIds(ent) {
+    delete ent.id;
+    if (ent.type === 'group' && ent.children) ent.children.forEach(stripIds);
+    return ent;
+  }
+
+  /** 深拷贝图元并递归清除 id，供镜像 / 阵列等复制场景使用 */
+  function cloneEntity(ent) {
+    return stripIds(JSON.parse(JSON.stringify(ent)));
+  }
+
   /** 可编辑属性的统一校验与写入；dryRun=true 时只校验不修改 */
   function setEntityProp(ent, key, value, dryRun) {
     if (!ent) return { ok: false, error: '图元不存在' };
+    if (ent.type === 'group') return { ok: false, error: '组合对象不支持直接修改属性，请先分解' };
     if (value === '' || value == null) return { ok: false, error: '请输入数值' };
     const v = Number(value);
     if (!isFinite(v)) return { ok: false, error: '请输入有效数字' };
@@ -946,8 +1009,55 @@
   }
 
   /** 以 a-b 直线为镜像轴生成对称图元副本 */
+  /** 以 base 为基点按 sx / sy 缩放图元；圆与圆弧按面积等效保持正圆不变形 */
+  function scaleEntity(ent, base, sx, sy) {
+    if (!ent) return ent;
+    if (ent.type === 'group') {
+      (ent.children || []).forEach(function (c) { scaleEntity(c, base, sx, sy); });
+      return ent;
+    }
+    const u = Math.sqrt(Math.abs(sx * sy));
+    function sp(p) {
+      return P(base.x + (p.x - base.x) * sx, base.y + (p.y - base.y) * sy);
+    }
+    if (ent.type === 'rect') {
+      const a = sp({ x: ent.x1, y: ent.y1 });
+      const b = sp({ x: ent.x2, y: ent.y2 });
+      ent.x1 = Math.min(a.x, b.x); ent.x2 = Math.max(a.x, b.x);
+      ent.y1 = Math.min(a.y, b.y); ent.y2 = Math.max(a.y, b.y);
+      return ent;
+    }
+    if (ent.type === 'poly' || ent.type === 'spline') {
+      ent.pts = (ent.pts || []).map(sp);
+      if (ent.type === 'spline' && ent.handles) {
+        ent.handles = ent.handles.map(function (h) {
+          if (!h) return h;
+          return { in: h.in ? sp(h.in) : h.in, out: h.out ? sp(h.out) : h.out };
+        });
+      }
+      return ent;
+    }
+    if (ent.type === 'circle' || ent.type === 'arc') {
+      ent.c = sp(ent.c);
+      ent.r = ent.r * u;
+      return ent;
+    }
+    ['p1', 'p2', 'p', 'c'].forEach(function (k) {
+      if (ent[k]) ent[k] = sp(ent[k]);
+    });
+    return ent;
+  }
+
   function mirrorEntity(ent, a, b) {
     if (!ent || !a || !b || dist(a, b) < EPS) return null;
+    if (ent.type === 'group') {
+      return stripIds({
+        type: 'group',
+        children: (ent.children || []).map(function (c) {
+          return mirrorEntity(c, a, b) || cloneEntity(c);
+        })
+      });
+    }
     if (ent.type === 'line') {
       return { type: 'line', p1: mirrorPoint(ent.p1, a, b), p2: mirrorPoint(ent.p2, a, b) };
     }
@@ -1090,6 +1200,7 @@
     entityLength: entityLength, entityMidpoint: entityMidpoint,
     hitDistance: hitDistance, entityBBox: entityBBox, bboxOf: bboxOf,
     translateEntity: translateEntity, rotatePoint: rotatePoint, rotateEntity: rotateEntity,
+    scaleEntity: scaleEntity,
     copyShape: copyShape, offsetEntity: offsetEntity,
     mirrorPoint: mirrorPoint, mirrorEntity: mirrorEntity,
     arcFromChord: arcFromChord, offsetPolyline: offsetPolyline,

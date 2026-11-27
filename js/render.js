@@ -54,12 +54,15 @@
     const view = app.view;
     const W = this.W, H = this.H;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    ctx.setLineDash([]);
     ctx.fillStyle = COLORS.bg;
     ctx.fillRect(0, 0, W, H);
 
     if (this.grid) this.drawGrid(W, H);
 
     // 坐标轴
+    ctx.save();
+    ctx.setLineDash([]);
     const o = this.screen({ x: 0, y: 0 });
     ctx.strokeStyle = COLORS.axis;
     ctx.lineWidth = 1;
@@ -67,6 +70,7 @@
     ctx.moveTo(0, o.y + 0.5); ctx.lineTo(W, o.y + 0.5);
     ctx.moveTo(o.x + 0.5, 0); ctx.lineTo(o.x + 0.5, H);
     ctx.stroke();
+    ctx.restore();
 
     // 图元
     const ents = app.model.entities;
@@ -119,6 +123,8 @@
     const startY = Math.floor(y1 / step) * step;
     if ((x2 - x1) / step > 400 || (y2 - y1) / step > 400) return;
 
+    ctx.save();
+    ctx.setLineDash([]);
     ctx.strokeStyle = COLORS.grid;
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -153,6 +159,7 @@
       ctx.lineTo(W, Math.round(s) + 0.5);
     }
     ctx.stroke();
+    ctx.restore();
   };
 
   Renderer.prototype.pathEntity = function (ent) {
@@ -227,6 +234,11 @@
 
   Renderer.prototype.strokeEntity = function (ent, color, width, glow) {
     const ctx = this.ctx;
+    if (ent.type === 'group') {
+      const kids = ent.children || [];
+      for (let i = 0; i < kids.length; i++) this.strokeEntity(kids[i], color, width, glow);
+      return;
+    }
     if (ent.type === 'point') {
       const p = this.screen(ent.p);
       ctx.save();
@@ -244,7 +256,8 @@
       return;
     }
     if (!this.pathEntity(ent)) return;
-    if (ent.type === 'rect' || ent.type === 'poly' || (ent.type === 'spline' && ent.closed)) this.fillEntity(ent);
+    if (ent.type === 'rect' || ent.type === 'circle' || ent.type === 'poly' ||
+      (ent.type === 'spline' && ent.closed)) this.fillEntity(ent);
     ctx.save();
     ctx.strokeStyle = color;
     ctx.lineWidth = width;
@@ -252,6 +265,7 @@
     ctx.lineJoin = 'round';
     if (ent.style === 'dashed') ctx.setLineDash([8, 6]);
     else if (ent.style === 'center') ctx.setLineDash([16, 4, 3, 4]);
+    else ctx.setLineDash([]);
     if (glow) {
       ctx.shadowColor = color;
       ctx.shadowBlur = 7;
@@ -279,7 +293,8 @@
   Renderer.prototype.previewEntity = function (ent) {
     if (!this.pathEntity(ent)) return;
     const ctx = this.ctx;
-    if (ent.type === 'rect' || ent.type === 'poly' || (ent.type === 'spline' && ent.closed)) this.fillEntity(ent);
+    if (ent.type === 'rect' || ent.type === 'circle' || ent.type === 'poly' ||
+      (ent.type === 'spline' && ent.closed)) this.fillEntity(ent);
     ctx.save();
     ctx.strokeStyle = COLORS.preview;
     ctx.lineWidth = 1.6;

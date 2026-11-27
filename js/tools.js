@@ -543,6 +543,10 @@
           when: function (p) { return p.lchain === true; }
         },
         {
+          key: 'lloop', type: 'toggle', label: '闭环', def: true, group: '模式',
+          when: function (p) { return p.lchain === true && p.llink === true; }
+        },
+        {
           key: 'lalign', type: 'choice', label: '方向吸附', def: 'off', group: '对象约束',
           when: function (p) { return p.larc === true; },
           options: [
@@ -602,6 +606,7 @@
       this.snapMode = null;
       this.snapPt = null;
       this.chainLastId = null;
+      this.chainFirstId = null;
       this._coordPreview = false;
       App.params.lref = '';
       App.params.larc = false;
@@ -618,6 +623,8 @@
       this.reset();
     },
     deactivate: function () {
+      // 退出工具前尝试闭环（用户直接切换到其他工具的场景）
+      this._maybeCloseLoop(true);
       this._unbindSnapKeys();
       this.snapOff = false;
       this.snapHold = false;
@@ -859,7 +866,9 @@
           type: 'coincident', ids: [prevId, list[0].id], aIdx: 1, bIdx: 0
         });
       } : null);
-      this.chainLastId = created.length ? created[0].id : null;
+      const createdId = created.length ? created[0].id : null;
+      this.chainLastId = createdId;
+      if (createdId && !this.chainFirstId) this.chainFirstId = createdId;
       return created[0] || null;
     },
     onParamChange: function (key, val) {
@@ -928,17 +937,76 @@
         App.updatePrompt();
       }
     },
+    /** 闭环私有方法：在连续画线 + 首尾链接 + 闭环 都开启时，自动连接首尾并建立重合约束。
+     *  被 onRightClick / onDragCancel / deactivate 统一调用。
+     *  @param {boolean} silent 是否静默（deactivate 时不弹 toast）
+     *  @returns {boolean} true 表示执行了闭环，false 表示因条件不满足而跳过
+     */
+    _maybeCloseLoop: function (silent) {
+      // 防抖：正在执行中就别重入（快速连按 ESC / 切工具 等）
+      if (this._closing) return false;
+      // 条件检查
+      if (!App.params.lchain || !App.params.llink || !App.params.lloop) return false;
+      if (!this.chainFirstId || !this.chainLastId) return false;
+      if (this.chainFirstId === this.chainLastId) return false; // 只有 1 条线没意义
+
+      const first = App.model.findById(this.chainFirstId);
+      const last = App.model.findById(this.chainLastId);
+      if (!first || !last) return false;
+      if (first.type !== 'line' || last.type !== 'line') return false;
+      // 首尾端点重合就没必要再加闭合线了
+      if (Geo.dist(last.p2, first.p1) < 1e-6) return false;
+
+      this._closing = true;
+      let ok = false;
+      try {
+        App.begin();
+        const closedLine = { type: 'line', p1: Geo.cloneP(last.p2), p2: Geo.cloneP(first.p1) };
+        const newEnt = App.model.add(closedLine);
+        if (newEnt && newEnt.id) {
+          const newId = String(newEnt.id);
+          App.model.addConstraint({ type: 'coincident', ids: [last.id, newId], aIdx: 1, bIdx: 0 });
+          App.model.addConstraint({ type: 'coincident', ids: [newId, first.id], aIdx: 1, bIdx: 0 });
+          App.solveConstraints();
+          ok = true;
+        } else {
+          App.abort();
+        }
+      } catch (e) {
+        try { App.abort(); } catch (_) {}
+        if (!silent && App.toast) App.toast('闭环失败：' + (e && e.message || '未知错误'));
+      } finally {
+        if (ok) App.end();
+        this._closing = false;
+      }
+
+      if (ok && !silent && App.toast) App.toast('已自动闭环：添加闭合直线并建立重合约束');
+      return ok;
+    },
     /** 右键 / ESC：取消当前直线并退出连续画线 */
     onRightClick: function () {
-      if (!App.params.lchain && !this.points.length) return;
+      // 先触发闭环（此时 lchain 还是 true，条件检查能过）
+      const didClose = this._maybeCloseLoop(false);
+
       const chain = !!App.params.lchain;
+      App.params.lchain = false;
+
+      this.reset();
+      if (App.updateParams) App.updateParams();
+      App.updatePrompt();
+      App.refresh();
+      if (chain && App.toast) App.toast('已退出连续画线模式');
+      else if (App.toast) App.toast('已取消当前直线');
+    },
+    /** 拖动过程取消（触屏手势中断等）：也需要尝试闭环 */
+    onDragCancel: function () {
+      if (!App.params.lchain) return;
+      this._maybeCloseLoop(true);
       App.params.lchain = false;
       this.reset();
       if (App.updateParams) App.updateParams();
       App.updatePrompt();
       App.refresh();
-      if (chain) App.toast('已退出连续画线模式');
-      else App.toast('已取消当前直线');
     },
     onRender: function (ctx, R) {
       // 坐标输入动态预览：面板正在编辑坐标时，预览“确定”后将生成的直线
@@ -1961,78 +2029,6 @@
     }
   });
 
-  /* ================= 编辑：样条线编辑（扩展功能，默认隐藏） ================= */
-  const splineEditTool = baseTool({
-    id: 'splineEdit', name: '样条编辑', cat: 'edit', icon: '∿', dragType: 'tool', hoverLive: true,
-    prompt: function () {
-      if (this.dragKind) return '拖动手柄调整曲线，松手完成';
-      return '点按样条线选中；拖动节点移动，拖动手柄端点调整曲率；修改平滑度后点“确定”';
-    },
-    params: function () {
-      return [{ key: 'esmooth', label: '平滑度', def: 0.5, min: 0, max: 1, group: '曲线' }];
-    },
-    reset: function () {
-      this.editId = null;
-      this.dragKind = null;
-      this.dragIdx = -1;
-      this.dragStart = null;
-      this.dragClone = null;
-    },
-    activate: function () {
-      this.reset();
-      // 复用样条工具的编辑分支
-      App.params.smode = 'edit';
-    },
-    deactivate: function () {
-      this.reset();
-      App.params.smode = 'draw';
-    },
-    _initHandles: splineTool._initHandles,
-    _nodeAt: splineTool._nodeAt,
-    _handleAt: splineTool._handleAt,
-    _select: splineTool._select,
-    onTap: function (p) {
-      splineTool.onTap.call(this, p);
-      const e = this.editId ? App.model.findById(this.editId) : null;
-      if (e && e.type === 'spline') {
-        App.params.esmooth = typeof e.smooth === 'number' ? e.smooth : 0.5;
-        App.updateParams && App.updateParams();
-      }
-    },
-    onDragStart: splineTool.onDragStart,
-    onDragMove: splineTool.onDragMove,
-    onDragEnd: splineTool.onDragEnd,
-    onDragCancel: splineTool.onDragCancel,
-    onRender: splineTool.onRender,
-    applyParams: function () {
-      let e = this.editId ? App.model.findById(this.editId) : null;
-      if (!e || e.type !== 'spline') {
-        const sel = App.model.selectedEntities ? App.model.selectedEntities() : [];
-        e = sel.filter(function (x) { return x.type === 'spline'; })[0] || null;
-      }
-      if (!e) { App.toast('请先点按一条样条线'); return; }
-      let s = Number(App.params.esmooth);
-      if (!isFinite(s)) { App.toast('请输入 0~1 的平滑度'); return; }
-      s = Math.max(0, Math.min(1, s));
-      const old = typeof e.smooth === 'number' ? e.smooth : 0.5;
-      const changed = Math.abs(old - s) > 1e-9;
-      App.begin();
-      if (changed) {
-        e.smooth = s;
-        e.handles = [];
-      }
-      App.end();
-      this.editId = e.id;
-      App.model.selected.clear();
-      App.model.selected.add(e.id);
-      if (App.afterSelectionChange) App.afterSelectionChange();
-      App.toast(changed ? '已应用平滑度 ' + s + '，控制手柄已重置' : '样条线编辑已保存');
-      App.updateParams && App.updateParams();
-      App.updatePrompt();
-      App.refresh();
-    }
-  });
-
   /* ================= 绘图：点 ================= */
   const pointTool = baseTool({
     id: 'point', name: '点', cat: 'draw', icon: '•', dragType: 'preview',
@@ -2558,10 +2554,128 @@
   });
 
   /* ================= 编辑：拉伸 ================= */
+  const PRECISE_STRETCH_MAX = 1000000;
+
+  /** 精确拉伸的几何预演；返回 {ok, reason?, entity?}，entity 是修改后的克隆 */
+  function preciseStretchPreview(e, delta, endpoint) {
+    if (!e) return { ok: false, reason: '请选中图元' };
+    if (!isFinite(delta)) return { ok: false, reason: '增量必须是有效数值' };
+    if (Math.abs(delta) > PRECISE_STRETCH_MAX) return { ok: false, reason: '增量超出允许范围（±' + PRECISE_STRETCH_MAX + '）' };
+    const clone = JSON.parse(JSON.stringify(e));
+    if (e.type === 'line') {
+      const L = Geo.dist(e.p1, e.p2);
+      if (L < 1e-9) return { ok: false, reason: '直线长度过小，无法精确拉伸' };
+      const target = endpoint === 'start' ? 'p1' : 'p2';
+      const fixedP = target === 'p1' ? e.p2 : e.p1;
+      // dir 始终从 fixedP 指向 target，确保 fixedP + dir * newLen 正确得到新端点
+      const origTarget = target === 'p1' ? e.p1 : e.p2;
+      const dir = { x: (origTarget.x - fixedP.x) / L, y: (origTarget.y - fixedP.y) / L };
+      const newLen = L + delta;
+      if (newLen <= 1e-6) return { ok: false, reason: '缩短后长度过小（≈0），建议减小负增量' };
+      clone[target].x = fixedP.x + dir.x * newLen;
+      clone[target].y = fixedP.y + dir.y * newLen;
+      return { ok: true, entity: clone };
+    }
+    if (e.type === 'arc') {
+      const r = e.r;
+      if (r <= 1e-9) return { ok: false, reason: '圆弧半径过小，无法精确拉伸' };
+      const curSweep = Geo.arcSweep(e);
+      const newSweep = curSweep + delta / r;
+      if (newSweep <= 1e-6) return { ok: false, reason: '缩短后弧长过小（≈0），建议减小负增量' };
+      if (newSweep >= Geo.TAU - 1e-6) return { ok: false, reason: '延长后将超过整圆，建议减小正增量' };
+      if (endpoint === 'end') {
+        if (e.ccw) clone.a1 = Geo.normAngle(e.a0 + newSweep);
+        else clone.a1 = Geo.normAngle(e.a0 - newSweep);
+      } else {
+        if (e.ccw) clone.a0 = Geo.normAngle(e.a1 - newSweep);
+        else clone.a0 = Geo.normAngle(e.a1 + newSweep);
+      }
+      return { ok: true, entity: clone };
+    }
+    if (e.type === 'circle') {
+      const r = e.r;
+      const newR = r + delta;
+      if (newR <= 1e-6) return { ok: false, reason: '缩短后半径过小（≈0），建议减小负增量' };
+      clone.r = newR;
+      return { ok: true, entity: clone };
+    }
+    return { ok: false, reason: '精确拉伸仅支持直线 / 圆弧 / 圆' };
+  }
+
   const stretchTool = baseTool({
     id: 'stretch', name: '拉伸', cat: 'edit', icon: '⇱', dragType: 'tool',
-    prompt: '拖动直线端点沿原方向伸缩；拖动圆弧端点调整弧长（圆心固定）',
+    reset: function () {
+      this.active = false;
+      this.entId = null;
+      this.clone = null;
+      this.mode = null;
+      this.fixed = null;
+      this.dir = null;
+      this.hover = null;
+    },
+    prompt: function () {
+      if (App.params.stp) {
+        const n = App.model.selected.size;
+        if (!n) return '精确拉伸：请先点选一个直线 / 圆弧 / 圆';
+        if (n > 1) return '精确拉伸：每次仅处理一个图元，请只选一个';
+        const e = App.model.selectedEntities()[0];
+        if (!e) return '精确拉伸：请先选中图元';
+        const delta = Number(App.params.sdd) || 0;
+        const ep = e.type === 'line' || e.type === 'arc'
+          ? (App.params.sept === 'start' ? '起点' : '终点')
+          : '';
+        const lbl = e.type === 'line' ? '直线' : e.type === 'arc' ? '圆弧' : e.type === 'circle' ? '圆' : '图元';
+        const deltaTxt = (delta >= 0 ? '+' : '') + fmt(delta);
+        return '精确拉伸 ' + lbl + (ep ? '·' + ep : '') + '：增量 ' + deltaTxt + '，点"确定"应用';
+      }
+      return '拖动直线端点沿原方向伸缩；拖动圆弧端点调整弧长（圆心固定）';
+    },
+    params: function () {
+      const precise = function (p) { return p.stp === true; };
+      const selectable = function (p) {
+        if (!precise(p)) return false;
+        const sel = App.model.selectedEntities();
+        if (sel.length !== 1) return false;
+        const e = sel[0];
+        return e.type === 'line' || e.type === 'arc';
+      };
+      return [
+        { key: 'stp', type: 'toggle', label: '精确拉伸', def: false, group: '拉伸方式' },
+        { key: 'sdd', label: '增量值', def: 0, group: '精确参数',
+          min: -PRECISE_STRETCH_MAX, max: PRECISE_STRETCH_MAX, apply: true, when: precise,
+          hint: '正数延长 / 增大半径，负数缩短 / 减小半径' },
+        { key: 'sept', type: 'choice', label: '端点', group: '精确参数', when: selectable,
+          def: 'end',
+          options: [
+            { v: 'start', label: '起点' },
+            { v: 'end',   label: '终点' }
+          ] }
+      ];
+    },
+    onTap: function (p) {
+      if (!App.params.stp) return;
+      const hit = App.pick(p);
+      if (!hit) {
+        App.model.selected.clear();
+        App.afterSelectionChange();
+        App.updatePrompt();
+        App.updateParams();
+        return;
+      }
+      const sel = App.model.selected;
+      if (sel.size === 1 && sel.has(hit.id)) return; // 已选中，保持
+      sel.clear();
+      sel.add(hit.id);
+      App.afterSelectionChange();
+      App.updatePrompt();
+      App.updateParams();
+    },
+    onHover: function (p) {
+      this.hover = p;
+      // 精确模式不在这里自动选中，交由 onTap 手动点选，避免覆盖已有选择
+    },
     onDragStart: function (p) {
+      if (App.params.stp) return; // 精确模式下互斥：仅通过点选 + 参数确定
       const e = App.pick(p);
       if (!e) return;
       this.entId = e.id;
@@ -2617,13 +2731,110 @@
       this.active = false;
       App.abort();
     },
+    applyParams: function () {
+      if (!App.params.stp) return;
+      const sel = App.model.selectedEntities();
+      if (sel.length === 0) { App.toast('请先选中一个图元'); return; }
+      if (sel.length > 1) { App.toast('精确拉伸每次仅处理一个图元'); return; }
+      const e = sel[0];
+      if (e.type !== 'line' && e.type !== 'arc' && e.type !== 'circle') {
+        App.toast('精确拉伸仅支持直线 / 圆弧 / 圆'); return;
+      }
+      const raw = App.params.sdd;
+      const delta = Number(raw);
+      if (!isFinite(delta)) { App.toast('增量必须是有效数值'); return; }
+      if (Math.abs(delta) > PRECISE_STRETCH_MAX) {
+        App.toast('增量超出允许范围（±' + PRECISE_STRETCH_MAX + '）'); return;
+      }
+      const endpoint = App.params.sept || 'end';
+      const res = preciseStretchPreview(e, delta, endpoint);
+      if (!res.ok) { App.toast(res.reason); return; }
+      App.begin();
+      Geo.copyShape(e, res.entity);
+      App.solveConstraints();
+      App.end();
+      // 提交后重置增量值，避免 onRender 用相同 delta 在新实体上再叠加画一层覆盖性预览虚线
+      App.params.sdd = 0;
+      if (typeof App.updateParams === 'function') App.updateParams();
+      if (typeof App.refresh === 'function') App.refresh();
+      const deltaTxt = (delta >= 0 ? '+' : '') + fmt(delta);
+      const ep = e.type === 'line' || e.type === 'arc'
+        ? (endpoint === 'start' ? '起点' : '终点')
+        : '';
+      const lbl = e.type === 'line' ? '直线' : e.type === 'arc' ? '圆弧' : '圆';
+      App.toast('已拉伸 ' + lbl + (ep ? '·' + ep : '') + '（增量 ' + deltaTxt + '）');
+    },
+    onParamChange: function () {
+      App.refresh();
+    },
     onRender: function (ctx, R) {
-      if (!this.active) return;
-      R.previewLabel('拉伸中', this.hover || { x: 0, y: 0 });
+      // 自由拖拽预览
+      if (this.active) {
+        R.previewLabel('拉伸中', this.hover || { x: 0, y: 0 });
+        return;
+      }
+      // 精确模式：预览
+      if (!App.params.stp) return;
+      const sel = App.model.selectedEntities();
+      if (sel.length !== 1) return;
+      const e = sel[0];
+      if (e.type !== 'line' && e.type !== 'arc' && e.type !== 'circle') return;
+      const delta = Number(App.params.sdd) || 0;
+      const endpoint = App.params.sept || 'end';
+      const res = preciseStretchPreview(e, delta, endpoint);
+      const screen = R.screen;
+      if (!res.ok) {
+        // 画红色虚线提示不可行
+        const sp = screen(e.type === 'line' ? Geo.entityMidpoint(e) : e.c || e.p);
+        R.previewLabel('不可行：' + res.reason, sp);
+        return;
+      }
+      const ne = res.entity;
+      // delta=0 时预览与原线完全重合，不画蓝色虚线以免盖住选中高亮，只给标签
+      if (!delta) {
+        const mid = ne.type === 'line' ? screen(Geo.entityMidpoint(ne)) : screen(ne.c || ne.p);
+        R.previewLabel('增量 0（当前无变化）', mid);
+        return;
+      }
+      ctx.save();
+      ctx.setLineDash([6, 6]);
+      ctx.strokeStyle = '#37c8ff';
+      ctx.fillStyle = 'rgba(55, 200, 255, .22)';
+      ctx.lineWidth = 1.5;
+      if (ne.type === 'line') {
+        const p1 = screen(ne.p1), p2 = screen(ne.p2);
+        ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+        ctx.fillStyle = 'rgba(55, 200, 255, .2)';
+        const mid = screen(Geo.entityMidpoint(ne));
+        R.previewLabel((endpoint === 'start' ? '起点' : '终点') + (delta >= 0 ? ' +' : ' ') + fmt(delta), mid);
+      } else if (ne.type === 'arc') {
+        const c = screen(ne.c);
+        const r = ne.r * App.view.scale;
+        ctx.beginPath(); ctx.arc(c.x, c.y, r, -ne.a0, -ne.a1, ne.ccw);
+        ctx.stroke();
+        const deltaSweep = delta / ne.r;
+        const deltaSweepTxt = (delta >= 0 ? '+' : '') + fmt(delta) + '（弧长）';
+        R.previewLabel((endpoint === 'start' ? '起点' : '终点') + ' ' + deltaSweepTxt, c);
+      } else if (ne.type === 'circle') {
+        const c = screen(ne.c);
+        const r = ne.r * App.view.scale;
+        ctx.beginPath(); ctx.arc(c.x, c.y, r, 0, Geo.TAU, true); ctx.stroke();
+        R.previewLabel('半径 ' + (delta >= 0 ? '+' : '') + fmt(delta), c);
+      }
+      ctx.restore();
     }
   });
 
   /* ================= 编辑：平移 ================= */
+  const MOVE_COPY_KEY = 'cad.move.copy';
+  function moveCopyDefault() {
+    try { return localStorage.getItem(MOVE_COPY_KEY) === '1'; } catch (e) { return false; }
+  }
+  /** 平移复制：保留原对象，额外生成一份位置不变的副本 */
+  function addMoveCopies(list) {
+    list.forEach(function (e) { App.model.add(JSON.parse(JSON.stringify(e))); });
+  }
+
   const moveTool = baseTool({
     id: 'move', name: '平移', cat: 'edit', icon: '↔', dragType: 'tool',
     mtoBase: null,
@@ -2636,18 +2847,19 @@
       this.clones = null;
     },
     prompt: function () {
+      const suffix = App.params.mcopy ? '（复制模式：保留原图形并生成副本）' : '';
       if (App.params.mto) {
         const n = App.model.selected.size;
-        if (!n) return '移动到：点按图形选择要移动的元素';
-        if (!this.mtoBase) return '已选 ' + n + ' 个，点按图形拾取基准点（自动吸附端点/圆心/交点）';
+        if (!n) return '移动到：点按图形选择要移动的元素' + suffix;
+        if (!this.mtoBase) return '已选 ' + n + ' 个，点按图形拾取基准点（自动吸附端点/圆心/交点）' + suffix;
         return '基准点（' + fmt(this.mtoBase.x) + '，' + fmt(this.mtoBase.y) +
-          '）：点按目标位置，或输入目标 X/Y 后确定';
+          '）：点按目标位置，或输入目标 X/Y 后确定' + suffix;
       }
       if (App.params.multi) {
         const n = App.model.selected.size;
-        return n ? '已选 ' + n + ' 个，继续点选，输入 X/Y 偏移后确定' : '点按图形连续选择（可多选），输入偏移后确定';
+        return (n ? '已选 ' + n + ' 个，继续点选，输入 X/Y 偏移后确定' : '点按图形连续选择（可多选），输入偏移后确定') + suffix;
       }
-      return '拖动图形平移，或输入 X/Y 偏移后确定';
+      return '拖动图形平移，或输入 X/Y 偏移后确定' + suffix;
     },
     /** 把选中元素的基准点精确移动到目标坐标（tx, ty） */
     _moveToTarget: function (tx, ty) {
@@ -2663,6 +2875,7 @@
         return false;
       }
       App.begin();
+      if (App.params.mcopy) addMoveCopies(list);
       list.forEach(function (e) { Geo.translateEntity(e, dx, dy); });
       App.end();
       App.params.tx = round3(tx);
@@ -2671,7 +2884,9 @@
       App.afterSelectionChange();
       if (App.updateParams) App.updateParams();
       App.updatePrompt();
-      App.toast('已将基准点移动到（' + fmt(tx) + '，' + fmt(ty) + '）');
+      App.toast(App.params.mcopy
+        ? '已将基准点移动到（' + fmt(tx) + '，' + fmt(ty) + '），原图形已保留'
+        : '已将基准点移动到（' + fmt(tx) + '，' + fmt(ty) + '）');
       return true;
     },
     params: function () {
@@ -2680,6 +2895,7 @@
       return [
         { key: 'multi', type: 'toggle', label: '连续选择', def: false, group: '选择', when: offsetMode },
         { key: 'mto', type: 'toggle', label: '移动到', def: false, group: '移动方式' },
+        { key: 'mcopy', type: 'toggle', label: '复制', def: moveCopyDefault(), group: '移动方式' },
         { key: 'tx', label: '目标 X', def: 0, group: '目标坐标', when: mto },
         { key: 'ty', label: '目标 Y', def: 0, group: '目标坐标', when: mto },
         { key: 'mx', label: 'X 偏移', def: 0, group: '偏移量', when: offsetMode },
@@ -2739,6 +2955,9 @@
     },
     onParamChange: function (key) {
       if (key === 'mto') this.mtoBase = null;
+      if (key === 'mcopy') {
+        try { localStorage.setItem(MOVE_COPY_KEY, App.params.mcopy ? '1' : '0'); } catch (e) {}
+      }
     },
     applyParams: function () {
       const list = App.model.selectedEntities();
@@ -2756,11 +2975,14 @@
       if (!isFinite(dx) || !isFinite(dy)) { App.toast('请输入有效的偏移数值'); return; }
       if (Math.abs(dx) < 1e-9 && Math.abs(dy) < 1e-9) { App.toast('X/Y 偏移量不能同时为 0'); return; }
       App.begin();
+      if (App.params.mcopy) addMoveCopies(list);
       list.forEach(function (e) { Geo.translateEntity(e, dx, dy); });
       App.end();
       App.afterSelectionChange();
       App.updatePrompt();
-      App.toast('已平移 ' + list.length + ' 个图元（ΔX ' + fmt(dx) + '，ΔY ' + fmt(dy) + '）');
+      App.toast(App.params.mcopy
+        ? '已平移并复制 ' + list.length + ' 个图元（ΔX ' + fmt(dx) + '，ΔY ' + fmt(dy) + '）'
+        : '已平移 ' + list.length + ' 个图元（ΔX ' + fmt(dx) + '，ΔY ' + fmt(dy) + '）');
     },
     onDragStart: function (p) {
       // 移动到模式：拖动用于平移视图，避免误移动图形
@@ -2776,6 +2998,7 @@
       this.origin = Geo.cloneP(p);
       this.last = p;
       App.begin();
+      if (App.params.mcopy) addMoveCopies(App.model.selectedEntities());
       this.active = true;
     },
     onDragMove: function (p) {
@@ -3124,6 +3347,477 @@
         R.previewLine(this.base, this.hover);
         R.previewLabel(degFmt(Geo.angleOf(this.base, this.hover)), this.hover);
       }
+    }
+  });
+
+  /* ================= 编辑：组合 / 分解 ================= */
+  /** 可参与组合的独立图元（≥2 个且全部不是组合对象） */
+  function groupCandidates() {
+    const sel = App.model.selected;
+    const list = App.model.selectedEntities();
+    if (sel.size < 2 || list.length !== sel.size) return [];
+    for (let i = 0; i < list.length; i++) if (list[i].type === 'group') return [];
+    return list;
+  }
+
+  /** 可分解的组合对象（恰好选中 1 个） */
+  function ungroupCandidate() {
+    const list = App.model.selectedEntities();
+    if (list.length !== 1 || list[0].type !== 'group') return null;
+    return list[0];
+  }
+
+  const groupTool = baseTool({
+    id: 'group', name: '组合', cat: 'edit', icon: '▣', dragType: 'pan',
+    enabled: function () { return groupCandidates().length >= 2; },
+    prompt: function () {
+      const n = groupCandidates().length;
+      return n >= 2
+        ? '已选 ' + n + ' 个独立图元，点按画布即可组合为一个整体'
+        : '请先选择 2 个及以上独立图元';
+    },
+    activate: function () { this.reset(); this.apply(); },
+    onTap: function () { this.apply(); },
+    apply: function () {
+      const list = App.model.selectedEntities();
+      const ok = list.length >= 2 && list.length === App.model.selected.size &&
+        list.every(function (e) { return e.type !== 'group'; });
+      if (!ok) { App.toast('未满足组合条件：请选择 2 个及以上独立图元'); return false; }
+      const ids = new Set(list.map(function (e) { return e.id; }));
+      const ordered = App.model.entities.filter(function (e) { return ids.has(e.id); });
+      if (ordered.length < 2) { App.toast('未满足组合条件：请选择 2 个及以上独立图元'); return false; }
+      const firstIdx = App.model.entities.indexOf(ordered[0]);
+      App.begin();
+      App.model.entities = App.model.entities.filter(function (e) { return !ids.has(e.id); });
+      const group = App.model.add({ type: 'group', children: ordered });
+      // add 会追加到末尾，移动到首个被选图元的位置以保持绘制层级
+      App.model.entities.pop();
+      App.model.entities.splice(Math.min(firstIdx, App.model.entities.length), 0, group);
+      App.model.selected.clear();
+      App.model.selected.add(group.id);
+      App.end();
+      App.afterSelectionChange();
+      App.updatePrompt();
+      App.toast('已组合：' + ordered.length + ' 个图元合并为 1 个整体');
+      return true;
+    }
+  });
+
+  const ungroupTool = baseTool({
+    id: 'ungroup', name: '分解', cat: 'edit', icon: '⧅', dragType: 'pan',
+    enabled: function () { return !!ungroupCandidate(); },
+    prompt: function () {
+      return ungroupCandidate() ? '已选组合对象，点按画布即可分解为独立图元' : '请先选中一个已组合的整体对象';
+    },
+    activate: function () { this.reset(); this.apply(); },
+    onTap: function () { this.apply(); },
+    apply: function () {
+      const g = ungroupCandidate();
+      if (!g) { App.toast('未满足分解条件：请选择一个组合对象'); return false; }
+      const idx = App.model.entities.indexOf(g);
+      const children = (g.children || []).slice();
+      App.begin();
+      App.model.remove(g.id);
+      const pos = Math.max(0, Math.min(idx, App.model.entities.length));
+      App.model.entities.splice.apply(App.model.entities, [pos, 0].concat(children));
+      App.model.selected.clear();
+      children.forEach(function (c) { App.model.selected.add(c.id); });
+      App.end();
+      App.afterSelectionChange();
+      App.updatePrompt();
+      App.toast('已分解：' + children.length + ' 个图元恢复为独立对象');
+      return true;
+    }
+  });
+
+  /* ================= 编辑：元素分解 ================= */
+  /** 复合图形的边 → 独立直线段（保留原线型，坐标不做任何偏移） */
+  function entitySegments(ent) {
+    const segs = [];
+    let pts = null, closed = false;
+    if (ent.type === 'rect') {
+      pts = Geo.rectPoints(ent);
+      closed = true;
+    } else if (ent.type === 'poly' && ent.pts && ent.pts.length >= 2) {
+      pts = ent.pts;
+      closed = ent.closed !== false;
+    }
+    if (!pts) return segs;
+    const n = pts.length;
+    const count = closed ? n : n - 1;
+    for (let i = 0; i < count; i++) {
+      const a = pts[i], b = pts[(i + 1) % n];
+      if (Geo.dist(a, b) < 1e-9) continue;
+      const seg = { type: 'line', p1: { x: a.x, y: a.y }, p2: { x: b.x, y: b.y } };
+      if (typeof ent.style === 'string') seg.style = ent.style;
+      segs.push(seg);
+    }
+    return segs;
+  }
+
+  function entityHitsRect(ent, rect) {
+    if (!rect) return true;
+    const pts = Geo.entityPolyline(ent, 32);
+    for (let i = 0; i < pts.length; i++) {
+      if (Geo.pointInRect(pts[i], rect)) return true;
+      if (i < pts.length - 1 && Geo.segmentIntersectsRect(pts[i], pts[i + 1], rect)) return true;
+    }
+    return false;
+  }
+
+  /** 递归分解：组合对象保留自身结构，仅替换其中的复合子图元 */
+  function explodeList(list, rect) {
+    const out = [];
+    let shapes = 0, lines = 0;
+    list.forEach(function (ent) {
+      if (ent.type === 'group') {
+        const sub = explodeList(ent.children || [], rect);
+        if (sub.shapes) {
+          const g = Object.assign({}, ent);
+          g.children = sub.items;
+          shapes += sub.shapes;
+          lines += sub.lines;
+          out.push(g);
+        } else {
+          out.push(ent);
+        }
+        return;
+      }
+      if (!entityHitsRect(ent, rect)) { out.push(ent); return; }
+      const segs = entitySegments(ent);
+      if (!segs.length) { out.push(ent); return; }
+      shapes += 1;
+      lines += segs.length;
+      segs.forEach(function (s) { out.push(s); });
+    });
+    return { items: out, shapes: shapes, lines: lines };
+  }
+
+  const explodeTool = baseTool({
+    id: 'explode', name: '元素分解', cat: 'edit', icon: '⌗', dragType: 'tool',
+    band: null,
+    reset: function () {
+      this.points = [];
+      this.hover = null;
+      this.band = null;
+    },
+    prompt: function () {
+      if (App.params.scope === 'region') {
+        return this.band ? '松开手指分解框选区域内的复合图形' : '在画布上拖动框选分解区域（与区域相交即分解）';
+      }
+      return '点按“确定”分解全部轮廓线 / 矩形 / 多边形（含组合内部）';
+    },
+    params: function () {
+      return [
+        {
+          key: 'scope', type: 'choice', label: '分解范围', def: 'all', group: '范围', apply: true,
+          options: [{ v: 'all', label: '全部元素' }, { v: 'region', label: '指定区域' }]
+        }
+      ];
+    },
+    onParamChange: function (key) {
+      if (key === 'scope') { this.band = null; App.refresh(); }
+    },
+    activate: function () { this.reset(); },
+    deactivate: function () { this.reset(); },
+    onTap: function () {
+      if (App.params.scope === 'region') { App.toast('请在画布上拖动框选分解区域'); return; }
+      this.applyParams();
+    },
+    onDragStart: function (p) {
+      if (App.params.scope !== 'region') return;
+      this.band = { x1: p.x, y1: p.y, x2: p.x, y2: p.y };
+    },
+    onDragMove: function (p) {
+      if (!this.band) return;
+      this.band.x2 = p.x;
+      this.band.y2 = p.y;
+      App.refresh();
+    },
+    onDragEnd: function (p) {
+      if (!this.band) return;
+      this.band.x2 = p.x;
+      this.band.y2 = p.y;
+      const rect = Geo.normalizeRect(this.band.x1, this.band.y1, this.band.x2, this.band.y2);
+      this.band = null;
+      this._explode(rect);
+    },
+    onDragCancel: function () {
+      this.band = null;
+      App.refresh();
+    },
+    onRender: function (ctx, R) {
+      if (!this.band) return;
+      R.previewRect(Geo.normalizeRect(this.band.x1, this.band.y1, this.band.x2, this.band.y2));
+    },
+    applyParams: function () {
+      if (App.params.scope === 'region') { App.toast('请先在画布上拖动框选分解区域'); return; }
+      this._explode(null);
+    },
+    _explode: function (rect) {
+      const res = explodeList(App.model.entities, rect);
+      if (!res.shapes) { App.toast('没有可分解的轮廓线 / 矩形 / 多边形'); return false; }
+      App.begin();
+      App.model.entities = res.items;
+      App.model.ensureIds(App.model.entities);
+      Array.from(App.model.selected).forEach(function (id) {
+        if (!App.model.findById(id)) App.model.selected.delete(id);
+      });
+      App.end();
+      App.afterSelectionChange();
+      App.updatePrompt();
+      App.toast('已分解 ' + res.shapes + ' 个复合图形，生成 ' + res.lines + ' 条独立线段');
+      return true;
+    }
+  });
+
+  /* ================= 编辑：填充 ================= */
+  const FILL_NAMES = { blue: '蓝色', green: '绿色', orange: '橙色', purple: '紫色' };
+
+  function canFillEnt(ent) {
+    if (!ent) return false;
+    if (ent.type === 'rect' || ent.type === 'circle') return true;
+    if (ent.type === 'poly') return ent.closed !== false;
+    if (ent.type === 'spline') return !!ent.closed;
+    return false;
+  }
+
+  /** 写入填充色；返回实际填充的图形数量（组合对象递归处理） */
+  function applyFill(ent, color) {
+    if (!ent) return 0;
+    if (ent.type === 'group') {
+      let n = 0;
+      (ent.children || []).forEach(function (c) { n += applyFill(c, color); });
+      return n;
+    }
+    if (!canFillEnt(ent)) return 0;
+    ent.fill = color;
+    return 1;
+  }
+
+  const fillTool = baseTool({
+    id: 'fill', name: '填充', cat: 'edit', icon: '▨', dragType: 'pan',
+    _color: function () { return App.params.fcolor || 'blue'; },
+    prompt: function () {
+      if (App.params.fmode === 'cont') return '连续填充：点按矩形 / 圆 / 闭合轮廓即可填充，可连续点按';
+      const n = App.model.selected.size;
+      return n ? '规则填充：已选 ' + n + ' 个，点“确定”批量填充' : '规则填充：先选中图形，再点“确定”批量填充';
+    },
+    params: function () {
+      return [
+        {
+          key: 'fmode', type: 'choice', label: '填充模式', def: 'batch', group: '填充', apply: true,
+          options: [{ v: 'batch', label: '规则填充' }, { v: 'cont', label: '连续填充' }]
+        },
+        {
+          key: 'fcolor', type: 'choice', label: '填充色', def: 'blue', group: '填充',
+          options: [
+            { v: 'blue', label: '蓝色' }, { v: 'green', label: '绿色' },
+            { v: 'orange', label: '橙色' }, { v: 'purple', label: '紫色' }
+          ]
+        }
+      ];
+    },
+    onTap: function (p) {
+      if (App.params.fmode !== 'cont') return;
+      const e = App.pick(p);
+      if (!e) { App.toast('请点按图形边缘进行填充'); return; }
+      const color = this._color();
+      App.begin();
+      const n = applyFill(e, color);
+      if (!n) {
+        App.abort();
+        App.toast('该图形不支持填充（仅矩形 / 圆 / 闭合轮廓 / 闭合样条）');
+        return;
+      }
+      App.end();
+      App.afterSelectionChange();
+      App.toast('已填充 ' + n + ' 个图形（' + (FILL_NAMES[color] || color) + '）');
+    },
+    applyParams: function () {
+      const list = App.model.selectedEntities();
+      if (!list.length) { App.toast('请先选中要填充的图形'); return; }
+      const color = this._color();
+      App.begin();
+      let n = 0;
+      list.forEach(function (e) { n += applyFill(e, color); });
+      if (!n) {
+        App.abort();
+        App.toast('所选图形不支持填充（仅矩形 / 圆 / 闭合轮廓 / 闭合样条）');
+        return;
+      }
+      App.end();
+      App.afterSelectionChange();
+      App.updatePrompt();
+      App.toast('已填充 ' + n + ' 个图形（' + (FILL_NAMES[color] || color) + '）');
+    }
+  });
+
+  /* ================= 编辑：比例缩放 ================= */
+  const SCALE_LOCK_KEY = 'cad.scale.proportional';
+  function scaleLockDefault() {
+    try { return localStorage.getItem(SCALE_LOCK_KEY) === '1'; } catch (e) { return false; }
+  }
+
+  function scaleSelBBox() {
+    const list = App.model.selectedEntities();
+    return list.length ? Geo.bboxOf(list) : null;
+  }
+
+  function scaleCorners(b) {
+    return [
+      { x: b.x1, y: b.y1 }, { x: b.x2, y: b.y1 },
+      { x: b.x2, y: b.y2 }, { x: b.x1, y: b.y2 }
+    ];
+  }
+
+  function hitScaleCorner(b, p, tol) {
+    const pts = scaleCorners(b);
+    for (let i = 0; i < pts.length; i++) {
+      if (Math.abs(pts[i].x - p.x) <= tol && Math.abs(pts[i].y - p.y) <= tol) return i;
+    }
+    return -1;
+  }
+
+  const scaleTool = baseTool({
+    id: 'scale', name: '缩放', cat: 'edit', icon: '⤢', dragType: 'tool',
+    reset: function () {
+      this.points = [];
+      this.hover = null;
+      this.drag = null;
+      this.clones = null;
+      this.active = false;
+    },
+    prompt: function () {
+      if (!App.model.selected.size) return '请先选中要缩放的图形';
+      if (this.drag) {
+        const pct = Math.round(this.drag.factor * 100);
+        const mode = this.drag.prop ? '等比' : '自由';
+        return mode + '缩放 ' + pct + '% · 松手完成' + (this.drag.prop ? '' : '（按住 Shift 等比）');
+      }
+      return App.params.slock
+        ? '拖动角点等比缩放；输入百分比后点“确定”精确缩放'
+        : '拖动角点自由缩放，按住 Shift 等比；输入百分比后点“确定”';
+    },
+    params: function () {
+      return [
+        { key: 'slock', type: 'toggle', label: '等比例', def: scaleLockDefault(), group: '缩放方式' },
+        { key: 'spct', label: '缩放百分比', def: 100, group: '数值缩放', apply: true }
+      ];
+    },
+    onParamChange: function (key) {
+      if (key === 'slock') {
+        try { localStorage.setItem(SCALE_LOCK_KEY, App.params.slock ? '1' : '0'); } catch (e) {}
+      }
+    },
+    activate: function () { this.reset(); },
+    deactivate: function () { this.reset(); },
+    onTap: function () {},
+    onDragStart: function (p) {
+      const b = scaleSelBBox();
+      if (!b) { App.toast('请先选中要缩放的图形'); return; }
+      const idx = hitScaleCorner(b, p, App.worldTol(16));
+      if (idx < 0) return;
+      const corners = scaleCorners(b);
+      this.clones = App.model.cloneSelected();
+      this.drag = {
+        anchor: corners[(idx + 2) % 4],
+        start: corners[idx],
+        sx: 1, sy: 1, factor: 1,
+        prop: !!(App.params.slock || App.shiftKey)
+      };
+      App.begin();
+      this.active = true;
+    },
+    onDragMove: function (p) {
+      if (!this.active || !this.drag) return;
+      const d = this.drag;
+      const dx0 = d.start.x - d.anchor.x;
+      const dy0 = d.start.y - d.anchor.y;
+      if (Math.abs(dx0) < 1e-9 || Math.abs(dy0) < 1e-9) return;
+      let sx = (p.x - d.anchor.x) / dx0;
+      let sy = (p.y - d.anchor.y) / dy0;
+      sx = Math.max(0.01, sx);
+      sy = Math.max(0.01, sy);
+      const prop = !!(App.params.slock || App.shiftKey);
+      if (prop) {
+        const s = Math.max(sx, sy);
+        sx = s;
+        sy = s;
+      }
+      d.sx = sx;
+      d.sy = sy;
+      d.prop = prop;
+      d.factor = prop ? sx : Math.sqrt(sx * sy);
+      this._apply(sx, sy);
+      App.updatePrompt();
+      App.refresh();
+    },
+    _apply: function (sx, sy) {
+      const d = this.drag;
+      this.clones.forEach(function (c) {
+        const e = App.model.findById(c.id);
+        if (!e) return;
+        Geo.copyShape(e, c);
+        Geo.scaleEntity(e, d.anchor, sx, sy);
+      });
+      App.solveConstraints();
+    },
+    onDragEnd: function () {
+      if (!this.active) return;
+      const d = this.drag;
+      this.active = false;
+      this.drag = null;
+      this.clones = null;
+      App.end();
+      App.afterSelectionChange();
+      App.updatePrompt();
+      App.toast('已缩放 ' + Math.round((d ? d.factor : 1) * 100) + '%' + (d && d.prop ? '（等比）' : ''));
+    },
+    onDragCancel: function () {
+      if (!this.active) return;
+      this.clones.forEach(function (c) {
+        const e = App.model.findById(c.id);
+        if (e) Geo.copyShape(e, c);
+      });
+      this.active = false;
+      this.drag = null;
+      this.clones = null;
+      App.abort();
+      App.refresh();
+    },
+    applyParams: function () {
+      const list = App.model.selectedEntities();
+      if (!list.length) { App.toast('请先选中要缩放的图形'); return; }
+      const pct = Number(App.params.spct);
+      if (!isFinite(pct) || pct <= 0) { App.toast('请输入大于 0 的缩放百分比'); return; }
+      if (Math.abs(pct - 100) < 1e-9) { App.toast('缩放百分比为 100%，无需缩放'); return; }
+      const s = pct / 100;
+      const b = Geo.bboxOf(list);
+      const base = { x: (b.x1 + b.x2) / 2, y: (b.y1 + b.y2) / 2 };
+      App.begin();
+      list.forEach(function (e) { Geo.scaleEntity(e, base, s, s); });
+      App.end();
+      App.afterSelectionChange();
+      if (App.updateParams) App.updateParams();
+      App.updatePrompt();
+      App.toast('已按 ' + round3(pct) + '% 等比缩放 ' + list.length + ' 个图元');
+    },
+    onRender: function (ctx, R) {
+      const b = scaleSelBBox();
+      if (!b) return;
+      R.previewRect(b);
+      const pts = scaleCorners(b);
+      ctx.save();
+      for (let i = 0; i < pts.length; i++) {
+        const s = R.screen(pts[i]);
+        ctx.fillStyle = '#1e90ff';
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1;
+        ctx.fillRect(s.x - 5, s.y - 5, 10, 10);
+        ctx.strokeRect(s.x - 5, s.y - 5, 10, 10);
+      }
+      ctx.restore();
     }
   });
 
@@ -4705,7 +5399,8 @@
 
   const list = [
     lineTool, centerTool, rectTool, polyTool, contourTool, splineTool, circleTool, arcTool, pointTool, angleLineTool, parallelTool, offsetTool,
-    selectTool, deleteTool, trimTool, filletTool, stretchTool, moveTool, arrayTool, mirrorTool, rotateTool, splineEditTool,
+    selectTool, deleteTool, trimTool, filletTool, stretchTool, moveTool, arrayTool, mirrorTool, rotateTool,
+    groupTool, ungroupTool, explodeTool, fillTool, scaleTool,
     measureLengthTool, measureAngleTool, measureDistTool, measureCoordTool, propsTool, dimTool,
     hConstraintTool, vConstraintTool, hAlignConstraintTool, vAlignConstraintTool, equalConstraintTool, verticalRelativeTool,
     symmetricTool, collinearTool, tangentTool, distanceTool,
